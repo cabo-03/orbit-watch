@@ -1,25 +1,28 @@
 name: Update data and publish
 
+# Three ways this runs:
+#  1. A built-in timer (the "next-run" job below): every run waits until the next 3-hour slot and
+#     then starts the following run itself. This keeps the site updating even when GitHub's own
+#     scheduler is late or skips runs, which it does not guarantee.
+#  2. GitHub's scheduler, as a backup.
+#  3. Every upload to the repository, and the "Run workflow" button on the Actions tab.
 on:
   schedule:
-    - cron: "17 */3 * * *"   # every 3 hours
+    - cron: "17 */3 * * *"   # every 3 hours, at 17 minutes past (UTC)
   push:
     branches: [main]
-  workflow_dispatch:          # adds a "Run workflow" button on the Actions tab
+  workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+  actions: write             # lets the timer start the next run
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +45,38 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  next-run:
+    # Runs even if this update failed, so one bad run never stops the chain.
+    needs: [build, deploy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    # Only one timer may exist: a newer run's timer replaces any older one.
+    concurrency:
+      group: next-run-timer
+      cancel-in-progress: true
+    steps:
+      - name: Wait for the next 3-hour slot
+        run: |
+          now=$(date -u +%s)
+          offset=$((17 * 60))
+          next=$(( ((now - offset) / 10800 + 1) * 10800 + offset ))
+          # if the slot is under 20 minutes away, skip to the one after
+          if [ $((next - now)) -lt 1200 ]; then next=$((next + 10800)); fi
+          echo "Next update at $(date -u -d @$next '+%Y-%m-%d %H:%M UTC'), waiting $(( (next - now) / 60 )) minutes"
+          sleep $((next - now))
+
+      - name: Start the next update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run update.yml --repo "${{ github.repository }}" --ref main
