@@ -25,6 +25,7 @@
       <button id="vSolar" aria-pressed="false">Solar system</button>
     </div>
     <button id="mobToggle" class="btn panel" aria-controls="side">Menu</button>
+    <button id="fullBtn" class="btn panel" type="button" aria-pressed="false" title="Hide or show all panels (H)">Full view</button>
     <div id="clock" class="panel">
       <span id="utc">—</span>
       <small><span id="mode" class="live">LIVE</span> · <button id="fresh" type="button" title="Show data status">loading data…</button></small>
@@ -36,6 +37,7 @@
       <button role="tab" id="tabObj" aria-selected="true" aria-controls="pObj">Objects</button>
       <button role="tab" id="tabFly" aria-selected="false" aria-controls="pFly">Flybys <span class="badge" id="flyCount"></span></button>
       <button role="tab" id="tabLaunch" aria-selected="false" aria-controls="pLaunch">Launches <span class="badge" id="launchCount"></span></button>
+      <button id="sideHide" class="tabhide" type="button" aria-label="Hide this panel" title="Hide panel (H hides everything)">‹</button>
     </div>
 
     <div id="pObj" class="pane" role="tabpanel">
@@ -59,6 +61,7 @@
     </div>
   </aside>
 
+  <button id="sideShow" class="btn panel" type="button" hidden>☰ Objects · Flybys · Launches</button>
   <section id="readout" class="panel" hidden aria-live="polite"></section>
 
   <div id="timebar" class="panel" role="group" aria-label="Time speed">

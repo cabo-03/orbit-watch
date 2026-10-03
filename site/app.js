@@ -41,6 +41,7 @@ const KIND = {
   planet: { label: "Planet" }, dwarf: { label: "Dwarf planet" }, asteroid: { label: "Asteroid", color: "#d0ad7c" },
   comet: { label: "Comet", color: "#79f2c8" }, neo: { label: "Near-Earth asteroid flyby", color: "#ff6b6b" },
   launch: { label: "Upcoming launch", color: "#ffb44a" },
+  recent: { label: "Recent launch", color: "#ff8a5c" },
 };
 
 /* ================================================================ helpers */
@@ -76,7 +77,7 @@ const localTime = ms => new Date(ms).toLocaleString(undefined, { weekday: "short
 let simMs = Date.now(), rate = 1, live = true, lastReal = performance.now();
 
 /* ================================================================ data */
-const DATA = { meta: null, groups: {}, small: [], cad: { approaches: [], orbits: [] }, launches: [], tleText: {} };
+const DATA = { meta: null, groups: {}, small: [], cad: { approaches: [], orbits: [] }, launches: [], recent: [], storms: [], tleText: {} };
 async function fetchText(p) { const r = await fetch(p, { cache: "no-cache" }); if (!r.ok) throw new Error(p + " " + r.status); return r.text(); }
 async function fetchJSON(p, d) { try { return JSON.parse(await fetchText(p)); } catch (e) { console.warn(e); return d; } }
 
@@ -388,7 +389,7 @@ function setupSats(m) {
     SAT.labels.set(id, makeLabel(shortName(SAT.names[i]), CATS[0].color, () => selectSat(id, true)));
   }
   waiting = false; spare = null;
-  buildLayers(); buildList();
+  buildLayers(); buildList(); buildLaunches();
   if (keepSel && SAT.idx.has(keepSel)) selectSat(keepSel, false);
   else if (!sel || sel.type === "sat") {
     const first = SAT.idx.has("25544") ? "25544" : (SAT.byCat[0][0] != null ? SAT.ids[SAT.byCat[0][0]] : SAT.ids[0]);
@@ -397,10 +398,18 @@ function setupSats(m) {
   requestProp();
 }
 function shortName(n) { return n.replace(/\s*\(.*?\)\s*/g, " ").replace(/\s+/g, " ").trim().slice(0, 28) || n; }
+let HIGH = null;   // indices of satellites from the selected recent launch
+function desigKey(d) { const m = String(d || "").match(/^(\d{4})-(\d{3})/); return m ? m[1].slice(2) + m[2] : null; }
+function recentSats(L) {
+  const k = L && desigKey(L.designator); if (!k) return [];
+  const out = []; for (let i = 0; i < SAT.n; i++) if (SAT.l1[i].slice(9, 14) === k) out.push(i);
+  return out;
+}
+function setHighlight(list) { HIGH = list && list.length ? new Set(list) : null; applyLayers(); }
 function applyLayers() {
   if (!satPoints) return;
   const sz = satPoints.geometry.attributes.size.array;
-  for (let i = 0; i < SAT.n; i++) { const c = CATS[SAT.cat[i]]; sz[i] = layerOn[c.key] ? c.size * (SAT.bright[i] && c.size < 4 ? 1.35 : 1) : 0; }
+  for (let i = 0; i < SAT.n; i++) { const c = CATS[SAT.cat[i]]; sz[i] = HIGH && HIGH.has(i) ? 8 : layerOn[c.key] ? c.size * (SAT.bright[i] && c.size < 4 ? 1.35 : 1) : 0; }
   satPoints.geometry.attributes.size.needsUpdate = true;
 }
 async function setLayer(key, on) {
@@ -412,7 +421,7 @@ async function setLayer(key, on) {
   applyLayers(); buildLayers();
 }
 function satECI(i) { return { x: SAT.pos[3 * i], y: SAT.pos[3 * i + 1], z: SAT.pos[3 * i + 2] }; }
-function satVisible(i) { return layerOn[CATS[SAT.cat[i]].key] && (SAT.pos[3 * i] || SAT.pos[3 * i + 1] || SAT.pos[3 * i + 2]); }
+function satVisible(i) { return (layerOn[CATS[SAT.cat[i]].key] || (HIGH && HIGH.has(i))) && (SAT.pos[3 * i] || SAT.pos[3 * i + 1] || SAT.pos[3 * i + 2]); }
 
 /* ================================================================ astronomy */
 const ROT_EQJ_ECL = A.Rotation_EQJ_ECL();
@@ -543,13 +552,14 @@ let sel = null;            // {type:'sat',idx} | {type:'moon'} | {type:'sun'} | 
 let selRec = null, selOrbitAt = -1e15, selTrack = null, tween = null;
 let focusS = null, focusSnap = false, zoomGoal = null;
 
-function selKey(s) { if (!s) return ""; if (s.type === "sat") return "sat:" + SAT.ids[s.idx]; if (s.type === "solar") return s.key; if (s.type === "launch") return "launch:" + s.i; if (s.type === "cad") return "cad:" + s.i; return s.type; }
+function selKey(s) { if (!s) return ""; if (s.type === "sat") return "sat:" + SAT.ids[s.idx]; if (s.type === "solar") return s.key; if (s.type === "launch") return "launch:" + s.i; if (s.type === "cad") return "cad:" + s.i; if (s.type === "storm") return "storm:" + s.i; if (s.type === "recent") return "recent:" + s.i; return s.type; }
 function selectSat(id, move) { const i = SAT.idx.get(String(id)); if (i == null) return; select({ type: "sat", idx: i }, move); }
 function select(s, move) {
   sel = s; selRec = null; selOrbitAt = -1e15; selTrack = null; passCache = null;
   if (s.type === "sat") { try { selRec = satellite.twoline2satrec(SAT.l1[s.idx], SAT.l2[s.idx]); } catch (e) { selRec = null; } }
-  const need = (s.type === "solar" || s.type === "sun") ? "solar" : (s.type === "sat" || s.type === "moon" || s.type === "launch" || s.type === "you") ? (view === "solar" ? "globe" : view) : view;
+  const need = (s.type === "solar" || s.type === "sun") ? "solar" : (s.type === "sat" || s.type === "moon" || s.type === "launch" || s.type === "you" || s.type === "storm" || s.type === "recent") ? (view === "solar" ? "globe" : view) : view;
   if (need !== view) setView(need, true);
+  setHighlight(s.type === "recent" ? recentSats(DATA.recent[s.i]) : null);
   if (move) moveCameraTo(s);
   for (const L of allLabels) L.el.classList.remove("sel");
   const L = labelFor(s); if (L) L.el.classList.add("sel");
@@ -566,6 +576,7 @@ function labelFor(s) {
   if (s.type === "solar") { const o = SOLAR.find(o => o.key === s.key); return o && o.lbl; }
   if (s.type === "launch") return padLabels[s.i];
   if (s.type === "you") return youLabel;
+  if (s.type === "storm") return stormLabels[s.i];
   return null;
 }
 let selSatLabel = null;
@@ -576,6 +587,14 @@ function hoverLabel() {
   return selSatLabel;
 }
 function moveCameraTo(s) {
+  if (s.type === "storm" || (s.type === "recent" && DATA.recent[s.i] && DATA.recent[s.i].lat != null)) {
+    const o = s.type === "storm" ? DATA.storms[s.i] : DATA.recent[s.i];
+    if (view === "map") { mapGoTo(o.lat, o.lon, 3); return; }
+    if (view !== "globe") return;
+    const dir = padWorld(o.lat, o.lon).normalize(), dist = Math.min(Math.max(camE.position.length(), 2.4), 4);
+    tween = { from: camE.position.clone(), to: dir.multiplyScalar(dist).add(new THREE.Vector3(0, dist * .1, 0)), t0: performance.now(), dur: 900 };
+    return;
+  }
   if (s.type === "sat" || s.type === "moon" || s.type === "launch" || s.type === "you") {
     if (view !== "globe") return;
     let dir;
@@ -608,7 +627,7 @@ function setView(v, fromSelect) {
   ctlE.enabled = v === "globe"; ctlS.enabled = v === "solar";
   for (const L of allLabels) { L.el.hidden = true; L.shown = false; }
   $("#tip").hidden = true;
-  $("#hint").textContent = v === "map" ? "Click any dot · the shaded area is night" : "Drag to rotate · scroll or pinch to zoom · click any dot";
+  $("#hint").textContent = v === "map" ? "Scroll or pinch to zoom · drag to move · double-click to reset · click any dot" : "Drag to rotate · scroll or pinch to zoom · click any dot";
   if (!fromSelect) {
     if (v === "solar" && (!sel || (sel.type !== "solar" && sel.type !== "sun"))) select({ type: "solar", key: "p:Earth" }, true);
     if (v !== "solar" && sel && (sel.type === "solar" || sel.type === "sun")) { const iss = SAT.idx.get("25544"); if (iss != null) select({ type: "sat", idx: iss }, true); }
@@ -619,6 +638,31 @@ $("#vGlobe").onclick = () => setView("globe");
 $("#vMap").onclick = () => setView("map");
 $("#vSolar").onclick = () => setView("solar");
 $("#mobToggle").onclick = () => { const s = $("#side"); s.dataset.open = s.dataset.open === "true" ? "false" : "true"; };
+
+/* panels: hide the side panel, close the details, or clear everything for a full view */
+function setSide(open) {
+  $("#side").classList.toggle("collapsed", !open); $("#sideShow").hidden = open || MOBILE;
+  if (!MOBILE) store.set("sideOpen", open); syncFullBtn();
+}
+function syncFullBtn() {
+  const clear = $("#side").classList.contains("collapsed") && ro.hidden;
+  $("#fullBtn").textContent = clear ? "Show panels" : "Full view";
+  $("#fullBtn").setAttribute("aria-pressed", clear ? "true" : "false");
+  $("#app").classList.toggle("clean", clear);
+}
+$("#sideHide").onclick = () => setSide(false);
+$("#sideShow").onclick = () => setSide(true);
+$("#fullBtn").onclick = () => {
+  const clear = $("#side").classList.contains("collapsed") && ro.hidden;
+  if (clear) { setSide(true); if (sel) renderReadout(); }
+  else { ro.hidden = true; setSide(false); if (MOBILE) $("#side").dataset.open = "false"; }
+  syncFullBtn();
+};
+addEventListener("keydown", ev => {
+  if (ev.target.closest("input, textarea") || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.key === "h" || ev.key === "H") $("#fullBtn").click();
+});
+new MutationObserver(syncFullBtn).observe(document.getElementById("readout"), { attributes: true, attributeFilter: ["hidden"] });
 
 /* ================================================================ globe update */
 const moonLabel = makeLabel("Moon", KIND.moon.color, () => select({ type: "moon" }, true));
@@ -667,7 +711,7 @@ function inWords(ms) {
 }
 function whenText(t) {
   const h = (t - Date.now()) / 3600000;
-  if (!isFinite(h)) return "soon"; if (h < 0) return "launched"; if (h < 1) return "within the hour";
+  if (!isFinite(h)) return "soon"; if (h < -2) return "awaiting result"; if (h < 0.25) return "launching now"; if (h < 1) return "within the hour";
   if (h < 36) return "in " + Math.round(h) + " h"; return "in " + Math.round(h / 24) + " days";
 }
 function buildPads() {
@@ -679,6 +723,48 @@ function buildPads() {
     padLabels.push(makeLabel(shortRocket(L.rocket) + " · " + launchWhen(L).short, "#ffb44a", () => select({ type: "launch", i }, true), "pad"));
   });
 }
+/* ---------- tropical storms */
+const STORM_COLORS = ["#7fd3ff", "#9be7c4", "#ffe066", "#ffb44a", "#ff8a5c", "#ff5d73", "#e45cff"]; // TD, TS, Cat1..Cat5
+function stormCat(s) {
+  const k = s.wind_kt;
+  if (k == null) return { idx: 1, text: "Tropical cyclone" };
+  if (k < 34) return { idx: 0, text: "Tropical depression" };
+  if (k < 64) return { idx: 1, text: "Tropical storm" };
+  const c = k < 83 ? 1 : k < 96 ? 2 : k < 113 ? 3 : k < 137 ? 4 : 5;
+  return { idx: c + 1, text: "Category " + c, cat: c };
+}
+function stormTitle(s) {
+  const c = stormCat(s), t = String(s.type || "");
+  // the same storm type has a regional name: typhoon (NW Pacific), cyclone (Indian Ocean, South Pacific), hurricane elsewhere
+  const strong = c.cat || /hurricane|typhoon/i.test(t);
+  const kind = !strong ? c.text : (s.lat > 0 && s.lon >= 100) ? "Typhoon" : (s.lat < 0 || (s.lon > 30 && s.lon < 100)) ? "Cyclone" : "Hurricane";
+  return `${kind} ${s.name}`;
+}
+const spiralTex = {};
+function stormTexture(color) {
+  if (spiralTex[color]) return spiralTex[color];
+  const c = document.createElement("canvas"); c.width = c.height = 64; const x = c.getContext("2d");
+  x.strokeStyle = color; x.lineWidth = 5; x.lineCap = "round";
+  for (const a0 of [0, Math.PI]) { x.beginPath(); for (let t = 0; t <= 1; t += 0.05) { const a = a0 + t * 2.4, r = 6 + t * 20; x.lineTo(32 + r * Math.cos(a), 32 + r * Math.sin(a)); } x.stroke(); }
+  x.fillStyle = color; x.beginPath(); x.arc(32, 32, 6, 0, 7); x.fill();
+  return (spiralTex[color] = new THREE.CanvasTexture(c));
+}
+const stormGroup = new THREE.Group(); earth.add(stormGroup);
+let stormLabels = [], stormSprites = [];
+function buildStorms() {
+  stormGroup.clear(); stormLabels.forEach(dropLabel); stormLabels = []; stormSprites = [];
+  DATA.storms.forEach((s, i) => {
+    if (s.lat == null || s.lon == null) { stormLabels.push(null); return; }
+    const col = STORM_COLORS[stormCat(s).idx];
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: stormTexture(col), sizeAttenuation: false, transparent: true, depthWrite: false }));
+    sp.scale.set(0.034, 0.034, 1); const la = s.lat * DEG, lo = s.lon * DEG, r = 1.012;
+    sp.position.set(r * Math.cos(la) * Math.cos(lo), r * Math.sin(la), -r * Math.cos(la) * Math.sin(lo));
+    stormGroup.add(sp); stormSprites.push(sp);
+    const c = stormCat(s);
+    stormLabels.push(makeLabel(`${s.name}${c.cat ? " · Cat " + c.cat : ""}`, col, () => select({ type: "storm", i }, true), "storm"));
+  });
+}
+
 let youMarker = null, youLabel = null;
 function updateYouMarker() {
   const loc = store.get("loc", null);
@@ -731,6 +817,8 @@ function updateGlobe() {
   PLANET_DIR_KEYS.forEach(k => planetDotsE[k].userData.dir && wantLabel(planetLabelsE[k], planetDotsE[k].userData.dir, camE, 28, true));
   padLabels.forEach((L, i) => { if (!L) return; const Ln = DATA.launches[i]; wantLabel(L, padWorld(Ln.lat, Ln.lon), camE, sel && sel.type === "launch" && sel.i === i ? 100 : 20, true); });
   if (youLabel) { const loc = store.get("loc", null); if (loc) wantLabel(youLabel, padWorld(loc.lat, loc.lon), camE, 60, true); }
+  if (layerOn.storms !== false) stormLabels.forEach((L, i) => { if (L) wantLabel(L, padWorld(DATA.storms[i].lat, DATA.storms[i].lon), camE, sel && sel.type === "storm" && sel.i === i ? 100 : 55, true); });
+  stormGroup.visible = layerOn.storms !== false;
 }
 
 /* ================================================================ solar update */
@@ -769,10 +857,23 @@ function updateSolar() {
 /* ================================================================ 2D map */
 const mctx = mapCanvas.getContext("2d");
 let mapImg = null;   // canvas or image used as the base layer
+// zoom and pan: MV.z = zoom factor, MV.lon/lat = map point at the centre of the screen
+const MV = { z: 1, lon: 0, lat: 0 };
 function mapRect() {
-  const W = mapCanvas.clientWidth, H = mapCanvas.clientHeight, w = Math.min(W, H * 2), h = w / 2;
-  return { x0: (W - w) / 2, y0: (H - h) / 2, w, h, W, H };
+  const W = mapCanvas.clientWidth, H = mapCanvas.clientHeight, w0 = Math.max(W, H * 2) > W * 1.15 ? Math.min(W, H * 2) : Math.max(W, H * 2);
+  const w = w0 * MV.z, h = w / 2;
+  let x0 = W / 2 - ((MV.lon + 180) / 360) * w, y0 = H / 2 - ((90 - MV.lat) / 180) * h;
+  if (w >= W) x0 = Math.min(0, Math.max(W - w, x0)); else x0 = (W - w) / 2;
+  if (h >= H) y0 = Math.min(0, Math.max(H - h, y0)); else y0 = (H - h) / 2;
+  MV.lon = ((W / 2 - x0) / w) * 360 - 180; MV.lat = 90 - ((H / 2 - y0) / h) * 180;   // keep the centre consistent with clamping
+  return { x0, y0, w, h, W, H };
 }
+let mapImg8 = null, mapImg8Loading = false;
+function sharperMap() {
+  if (MV.z < 2 || !DATA.map8k || mapImg8Loading) return;
+  mapImg8Loading = true; const im = new Image(); im.onload = () => { mapImg8 = im; }; im.src = DATA.map8k;
+}
+function mapGoTo(lat, lon, z) { MV.z = Math.max(MV.z, z || 1); MV.lat = lat; MV.lon = lon; }
 const mx = (R, lon) => R.x0 + ((lon + 180) / 360) * R.w;
 const my = (R, lat) => R.y0 + ((90 - lat) / 180) * R.h;
 function eciToLatLon(v, gmst) {
@@ -790,7 +891,9 @@ function drawMap() {
   if (mapCanvas.width !== Math.round(R.W * dpr) || mapCanvas.height !== Math.round(R.H * dpr)) { mapCanvas.width = Math.round(R.W * dpr); mapCanvas.height = Math.round(R.H * dpr); }
   mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   mctx.fillStyle = "#04060b"; mctx.fillRect(0, 0, R.W, R.H);
-  if (mapImg) mctx.drawImage(mapImg, R.x0, R.y0, R.w, R.h);
+  sharperMap();
+  const base = MV.z >= 2 && mapImg8 ? mapImg8 : mapImg;
+  if (base) mctx.drawImage(base, R.x0, R.y0, R.w, R.h);
   // graticule
   mctx.strokeStyle = "rgba(160,180,220,.10)"; mctx.lineWidth = 1;
   for (let lo = -150; lo <= 150; lo += 30) { mctx.beginPath(); mctx.moveTo(mx(R, lo), R.y0); mctx.lineTo(mx(R, lo), R.y0 + R.h); mctx.stroke(); }
@@ -802,7 +905,7 @@ function drawMap() {
   const night = new Path2D(); night.moveTo(R.x0, edgeY);
   for (let k = 0; k <= 180; k++) { const lon = -180 + k * 2, H = (lon - sunLL.lon) * DEG; const lat = Math.atan(-Math.cos(H) / Math.tan(dec)) / DEG; night.lineTo(mx(R, lon), my(R, lat)); }
   night.lineTo(R.x0 + R.w, edgeY); night.closePath();
-  mctx.fillStyle = "rgba(2,5,14,.66)"; mctx.fill(night);
+  mctx.fillStyle = "rgba(2,4,10,.8)"; mctx.fill(night);
   if (lightsCanvas) { mctx.save(); mctx.clip(night); mctx.globalCompositeOperation = "lighter"; mctx.drawImage(lightsCanvas, R.x0, R.y0, R.w, R.h); mctx.restore(); }
   // satellites
   mapDots = [];
@@ -827,6 +930,12 @@ function drawMap() {
     mctx.fillStyle = "#ffb44a"; mctx.save(); mctx.translate(x, y); mctx.rotate(Math.PI / 4); mctx.fillRect(-3.5, -3.5, 7, 7); mctx.restore();
     wantLabel2D(L, x, y, sel && sel.type === "launch" && sel.i === i ? 100 : 20);
   });
+  if (layerOn.storms !== false) DATA.storms.forEach((s, i) => {
+    if (s.lat == null || !stormLabels[i]) return; const x = mx(R, s.lon), y = my(R, s.lat), col = STORM_COLORS[stormCat(s).idx];
+    const img = stormTexture(col).image; mctx.drawImage(img, x - 11, y - 11, 22, 22);
+    wantLabel2D(stormLabels[i], x + 6, y, sel && sel.type === "storm" && sel.i === i ? 100 : 55);
+  });
+  if (HIGH) { mctx.strokeStyle = "#ffffff"; mctx.lineWidth = 1.5; for (const i of HIGH) { const v = satECI(i); if (!v.x && !v.y) continue; const ll = eciToLatLon(v, st.gmst); mctx.beginPath(); mctx.arc(mx(R, ll.lon), my(R, ll.lat), 5, 0, 7); mctx.stroke(); mapDots.push([mx(R, ll.lon), my(R, ll.lat), i]); } }
   const loc = store.get("loc", null);
   if (loc && youLabel) { mctx.fillStyle = "#5fe39a"; mctx.beginPath(); mctx.arc(mx(R, loc.lon), my(R, loc.lat), 4, 0, 7); mctx.fill(); wantLabel2D(youLabel, mx(R, loc.lon), my(R, loc.lat), 60); }
   for (const [id, L] of SAT.labels) { const i = SAT.idx.get(id); if (i == null || !layerOn.stations) continue; const v = satECI(i); if (!v.x && !v.y) continue; const ll = eciToLatLon(v, st.gmst); wantLabel2D(L, mx(R, ll.lon), my(R, ll.lat), 50); }
@@ -895,6 +1004,7 @@ function loadEarthImagery() {
       tex.anisotropy = MAX_ANISO; earthMat.uniforms.dayMap.value = tex; DATA.imageryDate = src.earth_image.date;
     });
     const im = new Image(); im.onload = () => { mapImg = im; }; im.src = `data/earth_day_4k.jpg${v}`;
+    DATA.map8k = big === "8k" ? `data/earth_day_8k.jpg${v}` : null; mapImg8 = null;
   }
   if (src.earth_night && src.earth_night.ok) {
     texLoader.load(`data/earth_night_${big}.jpg${v}`, tex => {
@@ -931,7 +1041,30 @@ function nearestSat(px, py, maxPx) {
   return best;
 }
 function eventXY(ev) { const r = (view === "map" ? mapCanvas : canvas).getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; }
-let downAt = null, hoverT = 0;
+let downAt = null, hoverT = 0, mapDrag = null;
+const mapPtrs = new Map();
+mapCanvas.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const R = mapRect(), [px, py] = eventXY(ev);
+  const lon = ((px - R.x0) / R.w) * 360 - 180, lat = 90 - ((py - R.y0) / R.h) * 180;
+  const z = Math.max(1, Math.min(10, MV.z * Math.exp(-ev.deltaY * 0.0015)));
+  const w = R.w / MV.z * z, h = w / 2;
+  MV.z = z; MV.lon = lon - ((px - R.W / 2) / w) * 360; MV.lat = lat + ((py - R.H / 2) / h) * 180;
+}, { passive: false });
+mapCanvas.addEventListener("dblclick", () => { MV.z = 1; MV.lon = 0; MV.lat = 0; });
+mapCanvas.addEventListener("pointerdown", ev => { mapPtrs.set(ev.pointerId, [ev.clientX, ev.clientY]); mapCanvas.setPointerCapture(ev.pointerId); mapDrag = { x: ev.clientX, y: ev.clientY, d: null }; });
+mapCanvas.addEventListener("pointermove", ev => {
+  if (!mapPtrs.has(ev.pointerId)) return;
+  const prev = mapPtrs.get(ev.pointerId); mapPtrs.set(ev.pointerId, [ev.clientX, ev.clientY]);
+  const R = mapRect();
+  if (mapPtrs.size === 2) {   // pinch
+    const [a, b] = [...mapPtrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (mapDrag && mapDrag.d) MV.z = Math.max(1, Math.min(10, MV.z * d / mapDrag.d));
+    if (mapDrag) mapDrag.d = d; return;
+  }
+  MV.lon -= ((ev.clientX - prev[0]) / R.w) * 360; MV.lat += ((ev.clientY - prev[1]) / R.h) * 180;
+});
+["pointerup", "pointercancel"].forEach(t => mapCanvas.addEventListener(t, ev => { mapPtrs.delete(ev.pointerId); if (!mapPtrs.size) mapDrag = null; }));
 [canvas, mapCanvas].forEach(cv => {
   cv.addEventListener("pointerdown", ev => { downAt = [ev.clientX, ev.clientY]; tween = null; });
   cv.addEventListener("pointerup", ev => {
@@ -974,7 +1107,7 @@ function findPasses(rec, loc, startMs, days, maxN) {
     if (!cur && e > 0 && prevE <= 0) cur = { rise: refine(prevT, t, true), max: e, maxT: t };
     if (cur) {
       if (e > cur.max) { cur.max = e; cur.maxT = t; }
-      if (e <= 0) { cur.set = refine(prevT, t, false); out.push(cur); cur = null; if (out.length >= maxN) break; }
+      if (e <= 0) { cur.set = refine(prevT, t, false); if (cur.max >= 3) out.push(cur); cur = null; if (out.length >= maxN) break; }
     }
     prevT = t; prevE = e;
   }
@@ -1063,7 +1196,21 @@ function renderReadout() {
   } else if (sel.type === "launch") {
     const L = DATA.launches[sel.i]; kind = KIND.launch.label; name = L.mission || L.name; color = KIND.launch.color;
     sub = esc([L.provider, L.rocket].filter(Boolean).join(" · "));
-    note = (launchWhen(L).exact ? "" : "<b>The date is not confirmed yet.</b> The provider has only given a rough timeframe. ") + esc(trimText(L.description, 380)) + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
+    const lw = launchWhen(L), live = lw.exact && Date.now() > lw.t - 15 * 60000 && Date.now() < lw.t + 2 * 3600000;
+    note = (live ? `<b>Launching now.</b> ${L.link ? "Use the Watch link for the live webcast. " : ""}Its satellites appear on the map once tracking data is published, usually within a day or two; look under Recently launched. ` : "") +
+      (lw.exact ? "" : "<b>The date is not confirmed yet.</b> The provider has only given a rough timeframe. ") + esc(trimText(L.description, 380)) + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
+  } else if (sel.type === "storm") {
+    const st0 = DATA.storms[sel.i], c = stormCat(st0); kind = "Tropical cyclone"; name = stormTitle(st0); color = STORM_COLORS[c.idx];
+    sub = esc(c.text + (st0.source ? " · source " + st0.source : ""));
+    note = `Position from the latest official advisory${st0.source === "NHC" ? " (US National Hurricane Center, every 6 hours)" : " (GDACS)"}. The clouds on the globe are from yesterday's photos, so the swirl may sit some distance from this marker. <a href="${esc(st0.link)}" target="_blank" rel="noopener">Official advisory</a>`;
+  } else if (sel.type === "recent") {
+    const L = DATA.recent[sel.i]; kind = KIND.recent.label; name = L.mission || L.name; color = KIND.recent.color;
+    sub = esc([L.provider, L.rocket].filter(Boolean).join(" · "));
+    const sats = HIGH ? [...HIGH] : [];
+    note = sats.length
+      ? `Its ${sats.length} tracked object${sats.length === 1 ? " is" : "s are"} highlighted with white rings on the globe and map. Click one to follow it.`
+      : `No tracking data for this launch has been published yet. New objects usually appear on CelesTrak within a day or two of launch, and this page picks them up on the next update. Classified payloads never appear.`;
+    if (sats.length) note += `<div class="satlist">${sats.slice(0, 40).map(i => `<button class="item" data-sat="${i}" style="--c:${CATS[SAT.cat[i]].color}"><span class="dot"></span><span class="n">${esc(SAT.names[i])}</span><span class="v">${fmt(len(satECI(i)) - RE)} km</span></button>`).join("")}${sats.length > 40 ? `<div class="intro">…and ${sats.length - 40} more</div>` : ""}</div>`;
   } else if (sel.type === "you") {
     kind = "Your location"; name = "You are here"; color = "#5fe39a";
     note = "Saved only in this browser. Use Edit to change it or Clear to remove it.";
@@ -1075,6 +1222,7 @@ function renderReadout() {
   ro.innerHTML = `<button class="btn" id="closeRO" aria-label="Close details">✕</button><div class="kind">${esc(kind)}</div><h3></h3>
     <div class="sub">${sub}</div><dl class="kv" id="kv"></dl>${note ? `<div class="note">${note}</div>` : ""}${sel.type === "sat" || sel.type === "you" ? '<div class="passes" id="passes"></div>' : ""}`;
   ro.querySelector("h3").textContent = name;
+  ro.querySelectorAll("[data-sat]").forEach(b => b.onclick = () => select({ type: "sat", idx: +b.dataset.sat }, true));
   ro.querySelector("#closeRO").onclick = () => { ro.hidden = true; };
   updateReadout();
   if (sel.type === "sat") renderPasses(ro.querySelector("#passes"), selRec, sel.idx, "Passes over you");
@@ -1129,6 +1277,18 @@ function updateReadout() {
     rows = `<dt>Launch</dt><dd>${esc(w.label)}</dd><dt>Countdown</dt><dd>${count}</dd>${w.exact && L.window_end && L.window_end !== L.window_start ? `<dt>Window closes</dt><dd>${localTime(Date.parse(L.window_end))}</dd>` : ""}
       <dt>Status</dt><dd>${esc(L.status || "—")}</dd><dt>Orbit</dt><dd>${esc(L.orbit || "—")}</dd><dt>Pad</dt><dd>${esc(L.pad || "—")}</dd><dt>Site</dt><dd>${esc(L.location || "—")}</dd>`;
   } else if (sel.type === "cad") rows = cadRows(DATA.cad.approaches[sel.i]);
+  else if (sel.type === "storm") {
+    const s0 = DATA.storms[sel.i], kmh = s0.wind_kt != null ? s0.wind_kt * 1.852 : null;
+    rows = `<dt>Max wind</dt><dd>${kmh != null ? fmt(kmh) + " km/h · " + fmt(s0.wind_kt * 1.15078) + " mph" : "—"}</dd>` +
+      (s0.pressure ? `<dt>Pressure</dt><dd>${fmt(s0.pressure)} hPa</dd>` : "") +
+      `<dt>Centre</dt><dd>${latlon(s0.lat, s0.lon)}</dd>` +
+      (s0.move_dir != null ? `<dt>Moving</dt><dd>${compass(s0.move_dir)} at ${fmt(s0.move_kt * 1.852)} km/h</dd>` : "") +
+      (s0.updated ? `<dt>Advisory</dt><dd>${localTime(Date.parse(s0.updated))} · ${ago(Date.now() - Date.parse(s0.updated))}</dd>` : "");
+  } else if (sel.type === "recent") {
+    const L = DATA.recent[sel.i], t = Date.parse(L.net);
+    rows = `<dt>Launched</dt><dd>${localTime(t)} · ${ago(Date.now() - t)}</dd><dt>Result</dt><dd>${esc(L.status || "—")}</dd><dt>Orbit</dt><dd>${esc(L.orbit || "—")}</dd>` +
+      `<dt>Launch ID</dt><dd>${esc(L.designator || "not assigned yet")}</dd><dt>Tracked objects</dt><dd>${HIGH ? HIGH.size : 0}</dd><dt>Site</dt><dd>${esc(L.location || "—")}</dd>`;
+  }
   else if (sel.type === "you") {
     const loc = store.get("loc", null);
     if (!loc) rows = `<dt>Location</dt><dd>Not set</dd>`;
@@ -1159,6 +1319,13 @@ function buildLayers() {
     b.onclick = () => setLayer(c.key, !layerOn[c.key]);
     el.appendChild(b);
   });
+  if (DATA.storms.length) {
+    const b = document.createElement("button"); b.className = "chip-t"; b.type = "button"; b.style.setProperty("--c", STORM_COLORS[4]);
+    b.setAttribute("aria-pressed", layerOn.storms !== false ? "true" : "false");
+    b.innerHTML = `<i></i>Tropical storms <span>${DATA.storms.length}</span>`;
+    b.onclick = () => { layerOn.storms = layerOn.storms === false; store.set("layers", layerOn); buildLayers(); };
+    el.appendChild(b);
+  }
   $("#satTotal").textContent = SAT.n ? fmt(SAT.n) + " tracked" : "";
 }
 function itemBtn(key, color, name, value, onClick, subline) {
@@ -1174,6 +1341,10 @@ function buildList() {
   const el = $("#list"); el.innerHTML = "";
   const st0 = (SAT.byCat[CAT_INDEX.stations] || []).slice().sort((a, b) => (SAT.ids[a] === "25544" ? -1 : SAT.ids[b] === "25544" ? 1 : SAT.names[a].localeCompare(SAT.names[b])));
   if (st0.length) { grp(el, "Space stations & crew craft", st0.length); st0.slice(0, 40).forEach(i => el.appendChild(itemBtn("sat:" + SAT.ids[i], CATS[0].color, SAT.names[i], "", () => select({ type: "sat", idx: i }, true)))); }
+  if (DATA.storms.length) {
+    grp(el, "Tropical storms now", DATA.storms.length);
+    DATA.storms.forEach((s0, i) => { const c = stormCat(s0); el.appendChild(itemBtn("storm:" + i, STORM_COLORS[c.idx], stormTitle(s0), c.cat ? "Cat " + c.cat : s0.wind_kt ? fmt(s0.wind_kt * 1.852) + " km/h" : "", () => select({ type: "storm", i }, true))); });
+  }
   grp(el, "Moon & Sun");
   el.appendChild(itemBtn("moon", KIND.moon.color, "Moon", "", () => select({ type: "moon" }, true)));
   el.appendChild(itemBtn("sun", "#ffd36b", "Sun", "", () => select({ type: "sun" }, true)));
@@ -1225,6 +1396,7 @@ function buildFlybys() {
 }
 function buildLaunches() {
   const el = $("#launchList"); el.innerHTML = "";
+  if (DATA.launches.length || DATA.recent.length) grp(el, "Upcoming", DATA.launches.length);
   $("#launchCount").textContent = DATA.launches.length || "";
   if (!DATA.launches.length) { el.innerHTML = `<div class="empty">Launch schedule arrives with the first automatic update.</div>`; return; }
   DATA.launches.forEach((L, i) => {
@@ -1233,9 +1405,19 @@ function buildLaunches() {
     const b = itemBtn("launch:" + i, KIND.launch.color, parts[1] || L.name, "", () => select({ type: "launch", i }, true), `${w.label} · ${parts[0] || L.rocket || ""} · ${L.location || ""}`);
     b.querySelector(".v").dataset.i = i; if (!w.exact) b.classList.add("tbd"); el.appendChild(b);
   });
+  if (DATA.recent.length) {
+    grp(el, "Recently launched", DATA.recent.length);
+    DATA.recent.forEach((L, i) => {
+      const parts = (L.name || "").split("|").map(x => x.trim()), n = recentSats(L).length, t = Date.parse(L.net);
+      const ok = /success/i.test(L.status || ""), fail = /fail/i.test(L.status || "");
+      const b = itemBtn("recent:" + i, fail ? "#ff5d73" : KIND.recent.color, parts[1] || L.name, n ? n + " tracked" : "", () => select({ type: "recent", i }, true),
+        `${new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ${parts[0] || L.rocket || ""} · ${ok ? "success" : fail ? "failure" : esc(L.status || "")}`);
+      el.appendChild(b);
+    });
+  }
 }
 function tickLaunchCountdowns() {
-  document.querySelectorAll("#launchList .v").forEach(v => { const L = DATA.launches[+v.dataset.i]; if (!L) return; const w = launchWhen(L); v.textContent = w.exact ? whenText(w.t) : "TBD"; });
+  document.querySelectorAll("#launchList .v[data-i]").forEach(v => { const L = DATA.launches[+v.dataset.i]; if (!L) return; const w = launchWhen(L); v.textContent = w.exact ? whenText(w.t) : "TBD"; });
 }
 const tabs = { tabObj: "pObj", tabFly: "pFly", tabLaunch: "pLaunch" };
 Object.entries(tabs).forEach(([t, p]) => { $("#" + t).onclick = () => { Object.entries(tabs).forEach(([t2, p2]) => { $("#" + t2).setAttribute("aria-selected", t2 === t); $("#" + p2).hidden = t2 !== t; }); }; });
@@ -1264,9 +1446,12 @@ const SOURCE_INFO = [
   ["smallbodies", "Asteroids and comets", "NASA JPL", v => fmt(v.count) + " objects"],
   ["closeapproach", "Asteroid flybys", "NASA JPL", v => fmt(v.count) + " in next 60 days"],
   ["launches", "Launch schedule", "Launch Library 2", v => fmt(v.count) + " launches"],
+  ["recentlaunches", "Recent launches", "Launch Library 2", v => fmt(v.count) + " launches"],
+  ["storms", "Tropical storms", "NHC and GDACS", v => v.count ? fmt(v.count) + " active" : "none active"],
   ["earth_image", "Earth daytime imagery", "NASA VIIRS", v => v.date ? "photos from " + imgDate(v.date) : ""],
   ["earth_night", "City lights", "NASA Black Marble", () => "fixed image"],
 ];
+
 function imgDate(s) { const d = new Date(s + "T12:00:00Z"); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 function renderStatus() {
   const m = DATA.meta || {}, src = m.sources || {}, now = Date.now();
@@ -1277,14 +1462,14 @@ function renderStatus() {
     return `<div class="srcrow"><div><b>${label}</b><span>${from}${v && v.ok && detail(v) ? " · " + detail(v) : ""}${v && !v.ok ? " · showing the last good copy" : ""}</span></div><div>${state}</div></div>`;
   }).join("");
   const hist = (m.history || []).slice().reverse().slice(0, 8).map(h => `<div class="histrow"><span>${localTime(Date.parse(h.at))}</span><span>${esc(h.trigger)}</span><span>${h.ok}/${h.total} OK</span></div>`).join("");
-  const sched = (m.history || []).some(h => h.trigger === "scheduled");
+  const sched = (m.history || []).some(h => h.trigger === "scheduled" || h.trigger === "automatic");
   ro.hidden = false; ro.style.setProperty("--c", "var(--ok)");
   ro.innerHTML = `<button class="btn" id="closeRO" aria-label="Close data status">✕</button><div class="kind">Data status</div><h3>${gen ? "Updated " + ago(now - gen) : "Waiting for first update"}</h3>
     <div class="sub">${gen ? localTime(gen) + (m.trigger ? " · started by " + esc(m.trigger) : "") : ""}</div>
     <dl class="kv"><dt>Next update</dt><dd>about ${new Date(nextScheduled(now)).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</dd><dt>Schedule</dt><dd>every 3 hours</dd></dl>
     <div class="passes"><h4>Sources in the last update</h4>${rows}</div>
-    ${hist ? `<div class="passes"><h4>Recent updates</h4>${hist}${sched ? "" : '<p class="intro" style="margin:6px 0 0">No scheduled update has run yet. GitHub can delay the first scheduled runs of a new workflow.</p>'}</div>` : ""}
-    <div class="note">Positions are calculated live in your browser from this data. An open page checks for new data every 15 minutes. GitHub can start scheduled updates up to an hour late.${m.run_url ? ` <a href="${esc(m.run_url)}" target="_blank" rel="noopener">Log of the last update</a>` : ""}</div>`;
+    ${hist ? `<div class="passes"><h4>Recent updates</h4>${hist}${sched ? "" : '<p class="intro" style="margin:6px 0 0">No automatic update has run yet. The first one starts at the next 3-hour slot after an upload.</p>'}</div>` : ""}
+    <div class="note">Positions are calculated live in your browser from this data. An open page checks for new data every 15 minutes. Each update starts the next one 3 hours later.${m.run_url ? ` <a href="${esc(m.run_url)}" target="_blank" rel="noopener">Log of the last update</a>` : ""}</div>`;
   ro.querySelector("#closeRO").onclick = () => { ro.hidden = true; sel = null; };
 }
 $("#fresh").addEventListener("click", () => { sel = { type: "status" }; for (const L of allLabels) L.el.classList.remove("sel"); renderStatus(); if (MOBILE) $("#side").dataset.open = "false"; });
@@ -1303,13 +1488,16 @@ async function loadAll(first) {
     fetchJSON("data/meta.json", null), fetchJSON("data/groups.json", {}), fetchJSON("data/smallbodies.json", { bodies: [] }),
     fetchJSON("data/closeapproach.json", { approaches: [], orbits: [] }), fetchJSON("data/launches.json", { launches: [] }),
   ]);
+  const [recent, storms] = await Promise.all([fetchJSON("data/recentlaunches.json", { launches: [] }), fetchJSON("data/storms.json", { storms: [] })]);
+  DATA.recent = ((recent && recent.launches) || []).filter(L => Date.parse(L.net) > Date.now() - 45 * 86400000);
+  DATA.storms = ((storms && storms.storms) || []).filter(x => x.lat != null && x.lon != null);
   DATA.meta = meta; DATA.groups = groups || {}; DATA.small = (small && small.bodies) || [];
   DATA.cad = cad || { approaches: [], orbits: [] }; DATA.cad.approaches = DATA.cad.approaches || []; DATA.cad.orbits = DATA.cad.orbits || [];
   DATA.launches = ((launches && launches.launches) || []).filter(L => !L.net || Date.parse(L.net) > Date.now() - 6 * 3600000);
   try { DATA.tleText.stations = await fetchText("data/tle/stations.txt"); } catch (e) { DATA.tleText.stations = ""; }
   try { DATA.tleText.active = await fetchText("data/tle/active.txt"); } catch (e) { DATA.tleText.active = ""; }
   if (debrisLoaded) await Promise.all(DEBRIS_FILES.map(async f => { try { DATA.tleText[f] = await fetchText(`data/tle/${f}.txt`); } catch (e) { /* skip */ } }));
-  initSmallBodies(); buildPads(); buildFlybys(); buildLaunches(); updateFreshness(); loadEarthImagery();
+  initSmallBodies(); buildPads(); buildStorms(); buildLayers(); buildFlybys(); buildLaunches(); updateFreshness(); loadEarthImagery();
   loadWorker();
   if (!first) buildList();
   if (sel && sel.type === "status") renderStatus();
@@ -1355,6 +1543,7 @@ function frame(now) {
 
 /* ================================================================ start */
 resize();
+if (!MOBILE && store.get("sideOpen", true) === false) setSide(false);
 computeCommon();
 initPlanets();
 updateYouMarker();
