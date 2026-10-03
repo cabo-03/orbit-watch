@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Orbit Watch</title>
+<meta name="description" content="Live 3D tracker for the ISS, thousands of satellites, the Moon, planets, asteroids and comets.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Semi+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="gl" aria-label="3D view of Earth and nearby space objects"></canvas>
+  <canvas id="map" hidden aria-label="Flat world map with satellite positions"></canvas>
+  <div id="labels"></div>
+  <div id="tip" hidden></div>
+
+  <div id="top">
+    <div class="brand panel"><i></i>Orbit Watch</div>
+    <div class="seg panel" role="group" aria-label="View">
+      <button id="vGlobe" aria-pressed="true">Globe</button>
+      <button id="vMap" aria-pressed="false">Map</button>
+      <button id="vSolar" aria-pressed="false">Solar system</button>
+    </div>
+    <button id="mobToggle" class="btn panel" aria-controls="side">Menu</button>
+    <div id="clock" class="panel">
+      <span id="utc">—</span>
+      <small><span id="mode" class="live">LIVE</span> · <span id="fresh" title="Age of the orbit data">loading data…</span></small>
+    </div>
+  </div>
+
+  <aside id="side" class="panel" data-open="false" aria-label="Objects, flybys and launches">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tabObj" aria-selected="true" aria-controls="pObj">Objects</button>
+      <button role="tab" id="tabFly" aria-selected="false" aria-controls="pFly">Flybys <span class="badge" id="flyCount"></span></button>
+      <button role="tab" id="tabLaunch" aria-selected="false" aria-controls="pLaunch">Launches <span class="badge" id="launchCount"></span></button>
+    </div>
+
+    <div id="pObj" class="pane" role="tabpanel">
+      <div class="searchrow">
+        <input id="search" type="search" placeholder="Search name or NORAD number" autocomplete="off" aria-label="Search satellites and objects">
+      </div>
+      <div id="results"></div>
+      <div class="sect">Satellite layers <span id="satTotal" class="muted"></span></div>
+      <div id="layers"></div>
+      <div id="list"></div>
+    </div>
+
+    <div id="pFly" class="pane" role="tabpanel" hidden>
+      <p class="intro">Asteroids passing within 0.05 AU (about 19 Moon distances) of Earth in the next 60 days, from NASA JPL.</p>
+      <div id="flyList"></div>
+    </div>
+
+    <div id="pLaunch" class="pane" role="tabpanel" hidden>
+      <p class="intro">Next rocket launches worldwide, from Launch Library 2. Launch sites are marked on the globe and map.</p>
+      <div id="launchList"></div>
+    </div>
+  </aside>
+
+  <section id="readout" class="panel" hidden aria-live="polite"></section>
+
+  <div id="timebar" class="panel" role="group" aria-label="Time speed">
+    <span class="lab">Time</span>
+    <button class="btn" id="liveBtn" aria-pressed="true">Live</button>
+    <button class="btn" data-rate="0">Pause</button>
+    <button class="btn" data-rate="60">1 min/s</button>
+    <button class="btn" data-rate="3600">1 h/s</button>
+    <button class="btn" data-rate="86400">1 day/s</button>
+    <button class="btn" data-rate="2592000">30 days/s</button>
+  </div>
+  <div id="hint">Drag to rotate · scroll or pinch to zoom · click any dot</div>
+  <div id="err" hidden>The 3D view could not start. WebGL may be turned off in this browser.</div>
+</div>
+
+<script src="lib/three.min.js"></script>
+<script src="lib/OrbitControls.js"></script>
+<script src="lib/satellite.min.js"></script>
+<script src="lib/astronomy.browser.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
