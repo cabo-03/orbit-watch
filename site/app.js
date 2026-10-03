@@ -23,9 +23,10 @@ const CATS = [
   { key: "debris", label: "Debris clouds", color: "#b07a58", on: false, size: 2.2 },
 ];
 const CAT_INDEX = Object.fromEntries(CATS.map((c, i) => [c.key, i]));
-const GROUP_TO_CAT = { stations: "stations", "last-30-days": "recent", starlink: "starlink", oneweb: "oneweb",
+const GROUP_TO_CAT = { "last-30-days": "recent", starlink: "starlink", oneweb: "oneweb",
   kuiper: "kuiper", gnss: "gnss", weather: "weather", geo: "geo", science: "science" };
 const CAT_ORDER = ["stations", "recent", "gnss", "weather", "science", "geo", "kuiper", "oneweb", "starlink"];
+const CREWED = /^(ISS|CSS|TIANGONG|TIANHE|WENTIAN|MENGTIAN|CREW DRAGON|DRAGON|SOYUZ|PROGRESS|CYGNUS|TIANZHOU|SHENZHOU|STARLINER|HTV|DREAM ?CHASER|AXIOM|HAKUTO)/i;
 const DEBRIS_FILES = ["fengyun-1c-debris", "cosmos-2251-debris", "iridium-33-debris", "cosmos-1408-debris"];
 
 const PLANETS = [
@@ -133,12 +134,13 @@ const texLoader = new THREE.TextureLoader();
 const dayTex = texLoader.load("textures/earth_atmos_2048.jpg");
 const nightTex = texLoader.load("textures/earth_lights_2048.png");
 const specTex = texLoader.load("textures/earth_specular_2048.jpg");
-[dayTex, nightTex, specTex].forEach(t => { t.anisotropy = 4; });
+const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+[dayTex, nightTex, specTex].forEach(t => { t.anisotropy = MAX_ANISO; });
 const earthMat = new THREE.ShaderMaterial({
-  uniforms: { dayMap: { value: dayTex }, nightMap: { value: nightTex }, specMap: { value: specTex }, sunDir: { value: new THREE.Vector3(1, 0, 0) } },
+  uniforms: { dayMap: { value: dayTex }, nightMap: { value: nightTex }, specMap: { value: specTex }, sunDir: { value: new THREE.Vector3(1, 0, 0) }, lightsFloor: { value: new THREE.Vector3(0.11, 0.11, 0.24) } },
   vertexShader: `varying vec2 vUv; varying vec3 vN; varying vec3 vW;
     void main(){ vUv=uv; vN=normalize(mat3(modelMatrix)*normal); vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
-  fragmentShader: `uniform sampler2D dayMap; uniform sampler2D nightMap; uniform sampler2D specMap; uniform vec3 sunDir;
+  fragmentShader: `uniform sampler2D dayMap; uniform sampler2D nightMap; uniform sampler2D specMap; uniform vec3 sunDir; uniform vec3 lightsFloor;
     varying vec2 vUv; varying vec3 vN; varying vec3 vW;
     void main(){
       vec3 n=normalize(vN); vec3 s=normalize(sunDir); float l=dot(n,s);
@@ -147,9 +149,9 @@ const earthMat = new THREE.ShaderMaterial({
       vec3 v=normalize(cameraPosition-vW); vec3 r=reflect(-s,n);
       float gl=pow(max(dot(r,v),0.0),28.0)*spec*0.45;
       vec3 dayCol=day*(0.18+0.95*max(l,0.0))+vec3(1.0,0.95,0.85)*gl*max(l,0.0);
-      vec3 nightCol=day*0.035+max(lights-vec3(0.11,0.11,0.24),0.0)*vec3(1.0,0.82,0.55)*1.6;
+      vec3 nightCol=day*0.03+max(lights-lightsFloor,0.0)*vec3(1.0,0.82,0.55)*1.7;
       vec3 col=mix(nightCol,dayCol,d);
-      col+=vec3(1.0,0.5,0.22)*exp(-pow(l/0.07,2.0))*0.12;
+      col+=vec3(1.0,0.55,0.3)*exp(-pow(l/0.035,2.0))*0.05;
       gl_FragColor=vec4(col,1.0);
     }`,
 });
@@ -303,7 +305,7 @@ function setupSats(m) {
   for (let i = 0; i < n; i++) {
     let c = "other";
     if (m.source[i] === "debris") c = "debris";
-    else if (m.source[i] === "stations") c = "stations";
+    else if (m.source[i] === "stations" && CREWED.test(m.names[i])) c = "stations";
     else { const t = tag[m.ids[i]]; if (t) c = CAT_ORDER.find(k => t.has(k)) || "other"; }
     SAT.cat[i] = CAT_INDEX[c]; SAT.bright[i] = vis.has(m.ids[i]) ? 1 : 0;
   }
@@ -560,13 +562,19 @@ const padGroup = new THREE.Group(); earth.add(padGroup);
 let padLabels = [];
 function padLocal(lat, lon) { const la = lat * DEG, lo = lon * DEG, r = 1.002; return new THREE.Vector3(r * Math.cos(la) * Math.cos(lo), r * Math.sin(la), -r * Math.cos(la) * Math.sin(lo)); }
 function padWorld(lat, lon) { return earth.localToWorld(padLocal(lat, lon)); }
+function shortRocket(r) { return (r || "Launch").replace(/\s+(Block|Blk|v\d|FT)\b.*$/i, "").replace(/\s*\(.*\)/, "").slice(0, 18); }
+function whenText(t) {
+  const h = (t - Date.now()) / 3600000;
+  if (!isFinite(h)) return "soon"; if (h < 0) return "launched"; if (h < 1) return "within the hour";
+  if (h < 36) return "in " + Math.round(h) + " h"; return "in " + Math.round(h / 24) + " days";
+}
 function buildPads() {
   padGroup.clear(); padLabels.forEach(dropLabel); padLabels = [];
   DATA.launches.forEach((L, i) => {
     if (L.lat == null || L.lon == null || i > 5) { padLabels.push(null); return; }
     const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.009), new THREE.MeshBasicMaterial({ color: 0xffb44a }));
     m.position.copy(padLocal(L.lat, L.lon)); padGroup.add(m);
-    padLabels.push(makeLabel((L.rocket || "Launch").split(" ")[0] + " · " + dur(Date.parse(L.net) - Date.now()).split(" ")[0], "#ffb44a", () => select({ type: "launch", i }, true), "pad"));
+    padLabels.push(makeLabel(shortRocket(L.rocket) + " · " + whenText(Date.parse(L.net)), "#ffb44a", () => select({ type: "launch", i }, true), "pad"));
   });
 }
 let youMarker = null, youLabel = null;
@@ -763,31 +771,35 @@ lightsImg.onload = () => {
   const c = document.createElement("canvas"); c.width = 2048; c.height = 1024; const x = c.getContext("2d");
   x.drawImage(lightsImg, 0, 0); const d = x.getImageData(0, 0, 2048, 1024), a = d.data;
   for (let k = 0; k < a.length; k += 4) { a[k] = Math.max(0, a[k] - 30) * 1.5; a[k + 1] = Math.max(0, a[k + 1] - 30) * 1.3; a[k + 2] = Math.max(0, a[k + 2] - 62) * 0.9; }
-  x.putImageData(d, 0, 0); lightsCanvas = c;
+  x.putImageData(d, 0, 0); if (!lightsCanvas) lightsCanvas = c;
 };
 lightsImg.src = "textures/earth_lights_2048.png";
 const baseImg = new Image(); baseImg.onload = () => { if (!mapImg) buildMapImage(baseImg); }; baseImg.src = "textures/earth_atmos_2048.jpg";
 
-/* yesterday's real NASA imagery, filled with Blue Marble where the satellite had no data */
-function loadTodayImagery() {
-  const info = DATA.meta && DATA.meta.sources && DATA.meta.sources.earth_image;
-  if (!info || !info.ok) return;
-  if (!baseImg.complete) { baseImg.addEventListener("load", loadTodayImagery, { once: true }); return; }
-  const img = new Image();
-  img.onload = () => {
-    const big = renderer.capabilities.maxTextureSize >= 4096 && !MOBILE;
-    const W = big ? 4096 : 2048, H = W / 2;
-    const c = document.createElement("canvas"); c.width = W; c.height = H; const x = c.getContext("2d");
-    x.drawImage(baseImg, 0, 0, W, H); const base = x.getImageData(0, 0, W, H);
-    x.drawImage(img, 0, 0, W, H); const today = x.getImageData(0, 0, W, H);
-    const b = base.data, d = today.data;
-    for (let k = 0; k < d.length; k += 4) { if (d[k] + d[k + 1] + d[k + 2] < 14) { d[k] = b[k]; d[k + 1] = b[k + 1]; d[k + 2] = b[k + 2]; } }
-    x.putImageData(today, 0, 0);
-    const tex = new THREE.CanvasTexture(c); tex.anisotropy = 4; tex.encoding = dayTex.encoding;
-    earthMat.uniforms.dayMap.value = tex; mapImg = c;
-    DATA.imageryDate = info.date;
-  };
-  img.src = "data/earth_today.jpg?v=" + encodeURIComponent(DATA.meta.generated || "");
+/* sharper published imagery: yesterday's real Earth (day) and NASA Black Marble (night) */
+function buildLightsCanvas(img, floor) {
+  const W = Math.min(img.naturalWidth, 4096), H = W / 2;
+  const c = document.createElement("canvas"); c.width = W; c.height = H; const x = c.getContext("2d");
+  x.drawImage(img, 0, 0, W, H); const d = x.getImageData(0, 0, W, H), a = d.data;
+  for (let k = 0; k < a.length; k += 4) { a[k] = Math.max(0, a[k] - floor[0]) * 1.6; a[k + 1] = Math.max(0, a[k + 1] - floor[1]) * 1.35; a[k + 2] = Math.max(0, a[k + 2] - floor[2]) * 0.8; }
+  x.putImageData(d, 0, 0); return c;
+}
+function loadEarthImagery() {
+  const src = (DATA.meta && DATA.meta.sources) || {};
+  const big = renderer.capabilities.maxTextureSize >= 8192 && !MOBILE ? "8k" : "4k";
+  const v = "?v=" + encodeURIComponent(DATA.meta && DATA.meta.generated || "");
+  if (src.earth_image && src.earth_image.ok) {
+    texLoader.load(`data/earth_day_${big}.jpg${v}`, tex => {
+      tex.anisotropy = MAX_ANISO; earthMat.uniforms.dayMap.value = tex; DATA.imageryDate = src.earth_image.date;
+    });
+    const im = new Image(); im.onload = () => { mapImg = im; }; im.src = `data/earth_day_4k.jpg${v}`;
+  }
+  if (src.earth_night && src.earth_night.ok) {
+    texLoader.load(`data/earth_night_${big}.jpg${v}`, tex => {
+      tex.anisotropy = MAX_ANISO; earthMat.uniforms.nightMap.value = tex; earthMat.uniforms.lightsFloor.value.set(0.06, 0.06, 0.07);
+    });
+    const im = new Image(); im.onload = () => { lightsCanvas = buildLightsCanvas(im, [16, 16, 18]); }; im.src = `data/earth_night_4k.jpg${v}`;
+  }
 }
 
 /* ================================================================ picking & hover */
@@ -1135,7 +1147,7 @@ async function loadAll(first) {
   try { DATA.tleText.stations = await fetchText("data/tle/stations.txt"); } catch (e) { DATA.tleText.stations = ""; }
   try { DATA.tleText.active = await fetchText("data/tle/active.txt"); } catch (e) { DATA.tleText.active = ""; }
   if (debrisLoaded) await Promise.all(DEBRIS_FILES.map(async f => { try { DATA.tleText[f] = await fetchText(`data/tle/${f}.txt`); } catch (e) { /* skip */ } }));
-  initSmallBodies(); buildPads(); buildFlybys(); buildLaunches(); updateFreshness(); loadTodayImagery();
+  initSmallBodies(); buildPads(); buildFlybys(); buildLaunches(); updateFreshness(); loadEarthImagery();
   loadWorker();
   if (!first) buildList();
 }
