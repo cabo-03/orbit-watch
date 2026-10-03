@@ -102,10 +102,44 @@ function starField(radius, count, seed) {
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.BufferAttribute(col, 3));
   return new THREE.Points(g, new THREE.PointsMaterial({ size: 1.3, sizeAttenuation: false, vertexColors: true, depthWrite: false }));
 }
+let DOT_TEX = null;
+function dotTexture() {
+  if (DOT_TEX) return DOT_TEX;
+  const c = document.createElement("canvas"); c.width = c.height = 64; const x = c.getContext("2d");
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,1)"); g.addColorStop(.55, "rgba(255,255,255,1)"); g.addColorStop(.75, "rgba(255,255,255,.35)"); g.addColorStop(1, "rgba(255,255,255,0)");
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); DOT_TEX = new THREE.CanvasTexture(c); return DOT_TEX;
+}
+// Real sky: 9,096 stars from the Yale Bright Star Catalogue at their J2000 positions and colours
+const STAR_DATA = fetch("textures/stars.json").then(r => r.json()).catch(() => null);
+function addRealStars(scene, radius, ecliptic) {
+  STAR_DATA.then(d => {
+    if (!d) { scene.add(starField(radius, 3500, 7)); return; }
+    const n = d.length / 6, pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
+    const ce = Math.cos(23.4393 * DEG), se = Math.sin(23.4393 * DEG);
+    for (let k = 0; k < n; k++) {
+      const ra = d[6 * k] * DEG, dec = d[6 * k + 1] * DEG, mag = d[6 * k + 2];
+      let x = Math.cos(dec) * Math.cos(ra), y = Math.cos(dec) * Math.sin(ra), z = Math.sin(dec);
+      if (ecliptic) { const y2 = y * ce + z * se, z2 = -y * se + z * ce; y = y2; z = z2; }
+      pos[3 * k] = x * radius; pos[3 * k + 1] = z * radius; pos[3 * k + 2] = -y * radius;
+      const b = Math.max(0.16, Math.min(1, 1.15 - 0.15 * mag));
+      col[3 * k] = d[6 * k + 3] * b; col[3 * k + 1] = d[6 * k + 4] * b; col[3 * k + 2] = d[6 * k + 5] * b;
+      size[k] = Math.max(1.6, Math.min(7.5, 6.2 - 0.85 * mag));
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.BufferAttribute(col, 3)); g.setAttribute("size", new THREE.BufferAttribute(size, 1));
+    const m = new THREE.ShaderMaterial({
+      uniforms: { pr: { value: PR } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: "attribute vec3 color; attribute float size; uniform float pr; varying vec3 vC; void main(){ vC=color; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); gl_PointSize=size*pr; }",
+      fragmentShader: "varying vec3 vC; void main(){ vec2 c=gl_PointCoord-0.5; float r=length(c)*2.0; float a=exp(-r*r*5.0); if(a<0.02) discard; gl_FragColor=vec4(vC*a,1.0); }",
+    });
+    const pts = new THREE.Points(g, m); pts.frustumCulled = false; pts.renderOrder = -1; scene.add(pts);
+  });
+}
 function dotPoint(color, size) {
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
-  return new THREE.Points(g, new THREE.PointsMaterial({ color: new THREE.Color(color), size, sizeAttenuation: false, depthWrite: false, transparent: true }));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color: new THREE.Color(color), size: size * 1.35, map: dotTexture(), alphaTest: 0.02, sizeAttenuation: false, depthWrite: false, transparent: true }));
 }
 function setDot(pt, v) { const a = pt.geometry.attributes.position; a.setXYZ(0, v.x, v.y, v.z); a.needsUpdate = true; pt.geometry.computeBoundingSphere(); }
 function line(pts, color, opacity) {
@@ -129,7 +163,7 @@ function ringTexture(color) {
 const sE = new THREE.Scene();
 const camE = new THREE.PerspectiveCamera(42, 1, 0.01, 6000);
 camE.position.set(2.6, 1.6, 3.2); if (MOBILE) camE.position.multiplyScalar(1.45);
-sE.add(starField(2500, 3500, 7));
+addRealStars(sE, 2500, false);
 const texLoader = new THREE.TextureLoader();
 const dayTex = texLoader.load("textures/earth_atmos_2048.jpg");
 const nightTex = texLoader.load("textures/earth_lights_2048.png");
@@ -157,15 +191,39 @@ const earthMat = new THREE.ShaderMaterial({
 });
 const earth = new THREE.Mesh(new THREE.SphereGeometry(1, 128, 96), earthMat);
 sE.add(earth);
-const atmo = new THREE.Mesh(new THREE.SphereGeometry(1.025, 64, 48), new THREE.ShaderMaterial({
+const atmo = new THREE.Mesh(new THREE.SphereGeometry(1.028, 96, 64), new THREE.ShaderMaterial({
   uniforms: { sunDir: { value: new THREE.Vector3(1, 0, 0) } }, transparent: true, blending: THREE.AdditiveBlending, side: THREE.BackSide, depthWrite: false,
   vertexShader: "varying vec3 vN;varying vec3 vW;void main(){vN=normalize(mat3(modelMatrix)*normal);vec4 w=modelMatrix*vec4(position,1.0);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}",
-  fragmentShader: "uniform vec3 sunDir;varying vec3 vN;varying vec3 vW;void main(){vec3 v=normalize(cameraPosition-vW);float f=pow(1.0-abs(dot(v,vN)),3.0);float d=smoothstep(-0.3,0.4,dot(normalize(vN),sunDir));gl_FragColor=vec4(vec3(0.35,0.65,1.0)*f*(0.2+0.9*d),f);}",
+  fragmentShader: `uniform vec3 sunDir; varying vec3 vN; varying vec3 vW;
+    void main(){
+      vec3 v=normalize(cameraPosition-vW); vec3 n=normalize(vN);
+      float f=pow(1.0-abs(dot(v,n)),2.6);
+      float l=dot(n,normalize(sunDir));
+      float lit=smoothstep(-0.28,0.25,l);
+      vec3 sky=vec3(0.32,0.6,1.0); vec3 dusk=vec3(1.0,0.48,0.2);
+      vec3 col=mix(dusk,sky,smoothstep(-0.05,0.35,l));
+      float a=f*lit;
+      gl_FragColor=vec4(col*a*1.15,a);
+    }`,
 }));
+const haze = new THREE.Mesh(new THREE.SphereGeometry(1.003, 96, 64), new THREE.ShaderMaterial({
+  uniforms: { sunDir: { value: new THREE.Vector3(1, 0, 0) } }, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+  vertexShader: "varying vec3 vN;varying vec3 vW;void main(){vN=normalize(mat3(modelMatrix)*normal);vec4 w=modelMatrix*vec4(position,1.0);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}",
+  fragmentShader: `uniform vec3 sunDir; varying vec3 vN; varying vec3 vW;
+    void main(){
+      vec3 v=normalize(cameraPosition-vW); vec3 n=normalize(vN);
+      float f=pow(1.0-max(dot(v,n),0.0),3.0);
+      float l=dot(n,normalize(sunDir));
+      float lit=smoothstep(-0.15,0.3,l);
+      vec3 col=mix(vec3(1.0,0.5,0.25),vec3(0.38,0.62,1.0),smoothstep(0.0,0.3,l));
+      gl_FragColor=vec4(col*f*lit*0.75,1.0);
+    }`,
+}));
+sE.add(haze);
 sE.add(atmo);
 const sunSpriteE = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture("rgba(255,244,214,1)", "rgba(255,190,90,0.35)"), depthWrite: false, blending: THREE.AdditiveBlending }));
 sunSpriteE.scale.set(110, 110, 1); sE.add(sunSpriteE);
-const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1737.4 / RE, 48, 32), new THREE.MeshLambertMaterial({ color: 0xbfc3cb }));
+const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1737.4 / RE, 48, 32), new THREE.MeshLambertMaterial({ map: texLoader.load("textures/moon_1024.jpg") }));
 sE.add(moonMesh);
 const moonLight = new THREE.DirectionalLight(0xffffff, 1.15); sE.add(moonLight); moonLight.target = moonMesh;
 sE.add(new THREE.AmbientLight(0x223344, .25));
@@ -186,7 +244,7 @@ const satMat = new THREE.ShaderMaterial({
       vec3 p=vec3(position.x,position.z,-position.y)*scale;
       if(size<=0.0||length(p)<0.5){ gl_Position=vec4(2.0,2.0,2.0,1.0); gl_PointSize=0.0; return; }
       float d=dot(p,sunDir); bool lit=d>0.0||length(p-d*sunDir)>1.0;
-      vA=lit?1.0:0.38; vC=color;
+      vA=lit?1.0:0.16; vC=color;
       gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0); gl_PointSize=size*pr;
     }`,
   fragmentShader: `varying vec3 vC; varying float vA;
@@ -199,7 +257,7 @@ const S = 10;
 const sS = new THREE.Scene();
 const camS = new THREE.PerspectiveCamera(45, 1, 0.05, 12000);
 camS.position.set(0, 120, 170);
-sS.add(starField(5000, 4000, 11));
+addRealStars(sS, 5000, true);
 const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture("rgba(255,250,230,1)", "rgba(255,180,70,0.5)"), depthWrite: false, blending: THREE.AdditiveBlending }));
 sunSprite.scale.set(6, 6, 1); sS.add(sunSprite);
 [1, 5, 10, 30].forEach(r => {
@@ -433,6 +491,17 @@ function smallOrbit(b) {
 /* ================================================================ solar-system bodies */
 const SOLAR = [];   // {key,name,kind,color,pt,orbitLine,lbl,getH(t,J)}
 const sunLabelS = makeLabel("Sun", "#ffd36b", () => select({ type: "sun" }, true));
+function trimText(t, n) { t = String(t || "").trim(); if (t.length <= n) return t; return t.slice(0, t.lastIndexOf(" ", n)).replace(/[,;:.]$/, "") + "…"; }
+function cleanName(n) { return String(n || "").trim().replace(/^\((.*)\)$/, "$1"); }
+// Planet orbits always show; asteroid and comet orbits stay faint, flyby orbits appear only when selected.
+function styleOrbits() {
+  for (const o of SOLAR) {
+    const on = sel && sel.type === "solar" && sel.key === o.key;
+    const base = o.kind === "planet" || o.kind === "dwarf" ? (o.key === "p:Earth" ? .45 : .28) : o.kind === "neo" ? 0 : .07;
+    o.orbitLine.visible = on || base > 0;
+    o.orbitLine.material.opacity = on ? .85 : base;
+  }
+}
 function addSolarBody(o) {
   o.pt = dotPoint(o.color, o.size); sS.add(o.pt);
   o.orbitLine = line(o.orbitPts().map(v => new THREE.Vector3(v.x * S, v.z * S, -v.y * S)), o.color, o.orbitOpacity); sS.add(o.orbitLine);
@@ -459,13 +528,14 @@ function initSmallBodies() {
     if (b.e < 1 && b.tp == null && (b.ma == null || b.epoch == null)) return;
     if (b.e >= 1 && b.tp == null) return;
     addSolarBody({
-      key: "sb:" + (b.des || b.id), name: b.name || b.full, kind, small: true, b,
+      key: "sb:" + (b.des || b.id), name: cleanName(b.name || b.full), kind, small: true, b,
       color: KIND[kind].color, size: kind === "neo" ? 6 : 5, orbitOpacity: kind === "neo" ? .35 : .22,
       getH: (t, J) => smallPos(b, J), orbitPts: () => smallOrbit(b),
     });
   };
   (DATA.small || []).forEach(b => add(b, b.kind === "comet" ? "comet" : "asteroid"));
   (DATA.cad.orbits || []).forEach(b => { if (!SOLAR.some(o => o.key === "sb:" + b.des)) add(b, "neo"); });
+  styleOrbits();
 }
 
 /* ================================================================ selection */
@@ -478,12 +548,13 @@ function selectSat(id, move) { const i = SAT.idx.get(String(id)); if (i == null)
 function select(s, move) {
   sel = s; selRec = null; selOrbitAt = -1e15; selTrack = null; passCache = null;
   if (s.type === "sat") { try { selRec = satellite.twoline2satrec(SAT.l1[s.idx], SAT.l2[s.idx]); } catch (e) { selRec = null; } }
-  const need = (s.type === "solar" || s.type === "sun") ? "solar" : (s.type === "sat" || s.type === "moon" || s.type === "launch") ? (view === "solar" ? "globe" : view) : view;
+  const need = (s.type === "solar" || s.type === "sun") ? "solar" : (s.type === "sat" || s.type === "moon" || s.type === "launch" || s.type === "you") ? (view === "solar" ? "globe" : view) : view;
   if (need !== view) setView(need, true);
   if (move) moveCameraTo(s);
   for (const L of allLabels) L.el.classList.remove("sel");
   const L = labelFor(s); if (L) L.el.classList.add("sel");
   document.querySelectorAll("[data-key]").forEach(el => el.setAttribute("aria-current", el.dataset.key === selKey(s) ? "true" : "false"));
+  styleOrbits();
   renderReadout();
   if (MOBILE && move) $("#side").dataset.open = "false";
 }
@@ -494,6 +565,7 @@ function labelFor(s) {
   if (s.type === "sun") return sunLabelS;
   if (s.type === "solar") { const o = SOLAR.find(o => o.key === s.key); return o && o.lbl; }
   if (s.type === "launch") return padLabels[s.i];
+  if (s.type === "you") return youLabel;
   return null;
 }
 let selSatLabel = null;
@@ -504,11 +576,12 @@ function hoverLabel() {
   return selSatLabel;
 }
 function moveCameraTo(s) {
-  if (s.type === "sat" || s.type === "moon" || s.type === "launch") {
+  if (s.type === "sat" || s.type === "moon" || s.type === "launch" || s.type === "you") {
     if (view !== "globe") return;
     let dir;
     if (s.type === "moon") dir = moonMesh.position.clone();
     else if (s.type === "launch") { const L = DATA.launches[s.i]; if (L.lat == null) return; dir = padWorld(L.lat, L.lon); }
+    else if (s.type === "you") { const loc = store.get("loc", null); if (!loc) return; dir = padWorld(loc.lat, loc.lon); }
     else { const p = selRec && satellite.propagate(selRec, new Date(simMs)); if (!p || !p.position) return; dir = T3(p.position.x, p.position.y, p.position.z).multiplyScalar(1 / RE); }
     const r = dir.length(); dir.normalize();
     const cur = camE.position.length();
@@ -584,16 +657,16 @@ function updateYouMarker() {
   if (!loc) { dropLabel(youLabel); youLabel = null; return; }
   youMarker = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), new THREE.MeshBasicMaterial({ color: 0x5fe39a }));
   youMarker.position.copy(padLocal(loc.lat, loc.lon)); earth.add(youMarker);
-  if (!youLabel) youLabel = makeLabel("You", "#5fe39a", null);
+  if (!youLabel) youLabel = makeLabel("You", "#5fe39a", () => select({ type: "you" }, true));
 }
 
 function updateGlobe() {
   earth.rotation.y = st.gmst; earth.updateMatrixWorld();
   const sd = T3(st.sunDir.x, st.sunDir.y, st.sunDir.z);
-  earthMat.uniforms.sunDir.value.copy(sd); atmo.material.uniforms.sunDir.value.copy(sd); satMat.uniforms.sunDir.value.copy(sd);
+  earthMat.uniforms.sunDir.value.copy(sd); atmo.material.uniforms.sunDir.value.copy(sd); haze.material.uniforms.sunDir.value.copy(sd); satMat.uniforms.sunDir.value.copy(sd);
   sunSpriteE.position.copy(sd).multiplyScalar(1800);
   const m = T3(st.moonKm.x, st.moonKm.y, st.moonKm.z).multiplyScalar(1 / RE);
-  moonMesh.position.copy(m); moonLight.position.copy(m).add(sd.clone().multiplyScalar(10));
+  moonMesh.position.copy(m); moonMesh.lookAt(0, 0, 0); moonMesh.rotateY(-Math.PI / 2); moonLight.position.copy(m).add(sd.clone().multiplyScalar(10));
   if (!moonOrbitLine.userData.J || Math.abs(st.J - moonOrbitLine.userData.J) > 0.5) {
     const pts = []; for (let k = 0; k <= 200; k++) { const t = st.t.AddDays(-13.66 + k / 200 * 27.32); const v = A.RotateVector(st.rot, A.GeoMoon(t)); pts.push(T3(v.x, v.y, v.z).multiplyScalar(AU_KM / RE)); }
     setLine(moonOrbitLine, pts); moonOrbitLine.userData.J = st.J;
@@ -890,40 +963,46 @@ function findPasses(rec, loc, startMs, days, maxN) {
   }
   return out;
 }
-function renderPasses(container) {
-  const loc = store.get("loc", null);
-  if (!loc) {
-    container.innerHTML = `<h4>Passes over you</h4><p class="intro" style="margin:0 0 8px">See when this satellite flies over you and whether you can spot it.</p>
-      <div class="locrow"><button class="btn solid" id="geoBtn">Use my location</button></div>
-      <div class="locrow" style="margin-top:8px"><input id="locIn" placeholder="or type: 40.42, -3.70" aria-label="Latitude and longitude"><button class="btn ghost" id="locSet">Set</button></div>
-      <p class="intro" id="locMsg" style="margin:6px 0 0"></p>`;
-    container.querySelector("#geoBtn").onclick = () => {
-      const msg = container.querySelector("#locMsg");
-      if (!navigator.geolocation) { msg.textContent = "This browser can't share your location. Type it instead."; return; }
-      msg.textContent = "Waiting for your browser to share your location…";
-      navigator.geolocation.getCurrentPosition(p => { setLoc(p.coords.latitude, p.coords.longitude); },
-        () => { msg.textContent = "Location was not shared. Type your latitude and longitude instead."; }, { timeout: 15000 });
-    };
-    container.querySelector("#locSet").onclick = () => {
-      const m = container.querySelector("#locIn").value.match(/(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/);
-      const msg = container.querySelector("#locMsg");
-      if (!m || Math.abs(+m[1]) > 90 || Math.abs(+m[2]) > 180) { msg.textContent = "Use latitude, longitude in degrees, for example 40.42, -3.70."; return; }
-      setLoc(+m[1], +m[2]);
-    };
-    return;
-  }
-  if (!passCache || passCache.idx !== sel.idx || Math.abs(passCache.t - simMs) > 600000) {
-    passCache = { idx: sel.idx, t: simMs, list: selRec ? findPasses(selRec, loc, simMs, 4, 5) : [] };
-  }
-  const list = passCache.list;
-  const rows = list.map(p => `<div class="pass"><div><b>${p.inProgress ? "Overhead now" : localTime(p.rise)}</b><br><span>${compass(p.azRise)} → ${compass(p.azSet)} · ${Math.max(1, Math.round((p.set - p.rise) / 60000))} min</span></div>
-     <div style="text-align:right"><b>${fmt(p.max)}°</b><br>${p.visible ? '<span class="chip ok">Visible</span>' : '<span>Not visible</span>'}</div></div>`).join("");
-  container.innerHTML = `<h4>Passes over you <span class="muted" style="letter-spacing:0;text-transform:none;font-family:var(--f-mono)">${fmt(loc.lat, 2)}, ${fmt(loc.lon, 2)}</span></h4>
-    ${rows || '<p class="intro" style="margin:0">No passes above the horizon in the next 4 days. Its orbit may not reach your latitude.</p>'}
-    <p class="intro" style="margin:8px 0 0">Times in your time zone. Max height in degrees above the horizon. "Visible" means the satellite is sunlit while your sky is dark. <button class="btn" id="locClear" style="padding:2px 0">Change location</button></p>`;
-  container.querySelector("#locClear").onclick = () => { store.set("loc", null); updateYouMarker(); renderReadout(); };
+let locEditing = false;
+function locText(loc) { return `${fmt(Math.abs(loc.lat), 2)}° ${loc.lat >= 0 ? "N" : "S"}, ${fmt(Math.abs(loc.lon), 2)}° ${loc.lon >= 0 ? "E" : "W"}`; }
+function renderLocEditor(container, loc, intro) {
+  container.innerHTML = `<h4>${loc ? "Change your location" : intro.title}</h4>${loc ? "" : `<p class="intro" style="margin:0 0 8px">${intro.text}</p>`}
+    <div class="locrow"><button class="btn solid" data-act="gps">Use my location</button></div>
+    <div class="locrow" style="margin-top:8px"><input id="locIn" value="${loc ? fmt(loc.lat, 4) + ", " + fmt(loc.lon, 4) : ""}" placeholder="latitude, longitude  e.g. 8.98, -79.52" aria-label="Latitude and longitude">
+      <button class="btn ghost" data-act="set">Save</button>${loc ? '<button class="btn" data-act="cancel">Cancel</button>' : ""}</div>
+    <p class="intro" id="locMsg" style="margin:6px 0 0">Negative latitude is south of the equator; negative longitude is west of Greenwich.</p>`;
+  const msg = container.querySelector("#locMsg");
+  container.querySelector('[data-act="gps"]').onclick = () => {
+    if (!navigator.geolocation) { msg.textContent = "This browser can't share your location. Type it instead."; return; }
+    msg.textContent = "Waiting for your browser to share your location…";
+    navigator.geolocation.getCurrentPosition(p => setLoc(p.coords.latitude, p.coords.longitude),
+      () => { msg.textContent = "Location was not shared. Allow location for this site in your browser (and for the browser in your system's privacy settings), or type it."; }, { timeout: 15000 });
+  };
+  const save = () => {
+    const m = container.querySelector("#locIn").value.replace(/,/g, " ").trim().match(/^(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/);
+    if (!m || Math.abs(+m[1]) > 90 || Math.abs(+m[2]) > 180) { msg.textContent = "Use two numbers in degrees: latitude, longitude. For example 8.98, -79.52 for Panama City."; return; }
+    setLoc(+m[1], +m[2]);
+  };
+  container.querySelector('[data-act="set"]').onclick = save;
+  container.querySelector("#locIn").addEventListener("keydown", e => { if (e.key === "Enter") save(); });
+  const cancel = container.querySelector('[data-act="cancel"]'); if (cancel) cancel.onclick = () => { locEditing = false; renderReadout(); };
 }
-function setLoc(lat, lon) { store.set("loc", { lat, lon }); passCache = null; updateYouMarker(); renderReadout(); }
+function renderPasses(container, rec, idx, title) {
+  const loc = store.get("loc", null);
+  if (!loc || locEditing) { renderLocEditor(container, loc, { title, text: "See when this satellite flies over you and whether you can spot it." }); return; }
+  if (!passCache || passCache.idx !== idx || passCache.lat !== loc.lat || passCache.lon !== loc.lon || Math.abs(passCache.t - simMs) > 600000) {
+    passCache = { idx, lat: loc.lat, lon: loc.lon, t: simMs, list: rec ? findPasses(rec, loc, simMs, 4, 5) : [] };
+  }
+  const rows = passCache.list.map(p => `<div class="pass"><div><b>${p.inProgress ? "Overhead now" : localTime(p.rise)}</b><br><span>${compass(p.azRise)} → ${compass(p.azSet)} · ${Math.max(1, Math.round((p.set - p.rise) / 60000))} min</span></div>
+     <div style="text-align:right"><b>${fmt(p.max)}°</b><br>${p.visible ? '<span class="chip ok">Visible</span>' : '<span>Not visible</span>'}</div></div>`).join("");
+  container.innerHTML = `<div class="lochead"><h4>${title}</h4><span><button class="btn" data-act="edit">Edit</button><button class="btn" data-act="clear">Clear</button></span></div>
+    <div class="locline">From ${locText(loc)}</div>
+    ${rows || '<p class="intro" style="margin:0">No passes above the horizon in the next 4 days. Its orbit may not reach your latitude.</p>'}
+    <p class="intro" style="margin:8px 0 0">Times in your time zone. Height is the highest point in degrees above the horizon. "Visible" means it is sunlit while your sky is dark.</p>`;
+  container.querySelector('[data-act="edit"]').onclick = () => { locEditing = true; renderReadout(); };
+  container.querySelector('[data-act="clear"]').onclick = () => { store.set("loc", null); locEditing = false; passCache = null; updateYouMarker(); if (sel && sel.type === "you") select({ type: "moon" }, false); else renderReadout(); };
+}
+function setLoc(lat, lon) { store.set("loc", { lat, lon }); locEditing = false; passCache = null; updateYouMarker(); renderReadout(); }
 
 /* ================================================================ readout */
 const ro = $("#readout");
@@ -954,18 +1033,22 @@ function renderReadout() {
   } else if (sel.type === "launch") {
     const L = DATA.launches[sel.i]; kind = KIND.launch.label; name = L.mission || L.name; color = KIND.launch.color;
     sub = esc([L.provider, L.rocket].filter(Boolean).join(" · "));
-    note = esc(L.description || "") + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
+    note = esc(trimText(L.description, 380)) + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
+  } else if (sel.type === "you") {
+    kind = "Your location"; name = "You are here"; color = "#5fe39a";
+    note = "Saved only in this browser. Use Edit to change it or Clear to remove it.";
   } else if (sel.type === "cad") {
-    const c = DATA.cad.approaches[sel.i]; kind = KIND.neo.label; name = c.name; color = KIND.neo.color;
+    const c = DATA.cad.approaches[sel.i]; kind = KIND.neo.label; name = cleanName(c.name); color = KIND.neo.color;
     note = "No orbit was published for this object in the latest update, so it isn't drawn in the solar view.";
   }
   ro.style.setProperty("--c", color);
   ro.innerHTML = `<button class="btn" id="closeRO" aria-label="Close details">✕</button><div class="kind">${esc(kind)}</div><h3></h3>
-    <div class="sub">${sub}</div><dl class="kv" id="kv"></dl>${note ? `<div class="note">${note}</div>` : ""}${sel.type === "sat" ? '<div class="passes" id="passes"></div>' : ""}`;
+    <div class="sub">${sub}</div><dl class="kv" id="kv"></dl>${note ? `<div class="note">${note}</div>` : ""}${sel.type === "sat" || sel.type === "you" ? '<div class="passes" id="passes"></div>' : ""}`;
   ro.querySelector("h3").textContent = name;
   ro.querySelector("#closeRO").onclick = () => { ro.hidden = true; };
   updateReadout();
-  if (sel.type === "sat") renderPasses(ro.querySelector("#passes"));
+  if (sel.type === "sat") renderPasses(ro.querySelector("#passes"), selRec, sel.idx, "Passes over you");
+  if (sel.type === "you") { const i = SAT.idx.get("25544"); let rec = null; try { rec = i != null ? satellite.twoline2satrec(SAT.l1[i], SAT.l2[i]) : null; } catch (e) { rec = null; } renderPasses(ro.querySelector("#passes"), rec, "you", "ISS passes over you"); }
 }
 function updateReadout() {
   const kv = ro.querySelector("#kv"); if (!kv || ro.hidden || !sel) return;
@@ -1015,6 +1098,15 @@ function updateReadout() {
     rows = `<dt>${t > Date.now() ? "Countdown" : "Since launch"}</dt><dd>T${t > Date.now() ? "−" : "+"}${dur(t - Date.now())}</dd><dt>Window</dt><dd>${localTime(t)}</dd>
       <dt>Status</dt><dd>${esc(L.status || "—")}</dd><dt>Orbit</dt><dd>${esc(L.orbit || "—")}</dd><dt>Pad</dt><dd>${esc(L.pad || "—")}</dd><dt>Site</dt><dd>${esc(L.location || "—")}</dd>`;
   } else if (sel.type === "cad") rows = cadRows(DATA.cad.approaches[sel.i]);
+  else if (sel.type === "you") {
+    const loc = store.get("loc", null);
+    if (!loc) rows = `<dt>Location</dt><dd>Not set</dd>`;
+    else {
+      const obs = new A.Observer(loc.lat, loc.lon, 50), eq = A.Equator(A.Body.Sun, st.t, obs, true, true), alt = A.Horizon(st.t, obs, eq.ra, eq.dec, "normal").altitude;
+      const sky = alt > 0 ? "Daylight" : alt > -6 ? "Twilight" : alt > -18 ? "Getting dark" : "Dark night";
+      rows = `<dt>Position</dt><dd>${locText(loc)}</dd><dt>Sun</dt><dd>${fmt(Math.abs(alt), 1)}° ${alt >= 0 ? "above" : "below"} horizon</dd><dt>Sky</dt><dd>${sky}</dd>`;
+    }
+  }
   kv.innerHTML = rows;
 }
 function cadRows(c) {
@@ -1093,7 +1185,7 @@ function buildFlybys() {
     const t = (c.jd - 2440587.5) * 86400000, days = (t - Date.now()) / 86400000;
     const when = days < 1 ? "in " + fmt(days * 24) + " h" : "in " + fmt(days) + " days";
     const sizeTxt = c.diameter ? fmt(c.diameter * 1000) + " m" : c.H != null ? "~" + fmt(Math.round(1329 / Math.sqrt(0.14) * Math.pow(10, -c.H / 5) * 1000 / 5) * 5) + " m" : "";
-    const b = itemBtn("cad:" + i, KIND.neo.color, c.name, fmt(c.ld, 1) + " LD", () => {
+    const b = itemBtn("cad:" + i, KIND.neo.color, cleanName(c.name), fmt(c.ld, 1) + " LD", () => {
       const o = SOLAR.find(o => o.key === "sb:" + c.des);
       if (o) select({ type: "solar", key: o.key }, true); else select({ type: "cad", i }, false);
     }, `${when} · ${fmt(c.v, 1)} km/s${sizeTxt ? " · " + sizeTxt : ""}${c.ld < 1 ? " · closer than the Moon" : ""}`);

@@ -130,3 +130,7 @@ dl.kv dd{margin:0;text-align:right;font:500 12.5px/1.6 var(--f-mono);font-varian
   #timebar .btn{padding:8px 9px;flex:none}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.lochead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:2px}
+.lochead h4{margin:0}
+.lochead .btn{padding:4px 7px;color:var(--accent)}
+.locline{font:500 11.5px var(--f-mono);color:var(--muted);margin-bottom:6px}
