@@ -321,6 +321,8 @@ def update_launches():
                        (info[0].get("url") if info and isinstance(info[0], dict) else None)
                 out.append({
                     "name": r.get("name"), "net": r.get("net"),
+                    "precision": pick(r, "net_precision", "name"),
+                    "window_start": r.get("window_start"), "window_end": r.get("window_end"),
                     "status": pick(r, "status", "abbrev") or pick(r, "status", "name"),
                     "provider": pick(r, "launch_service_provider", "name"),
                     "rocket": pick(r, "rocket", "configuration", "full_name") or pick(r, "rocket", "configuration", "name"),
@@ -462,7 +464,22 @@ def main():
             step()
         except Exception as e:  # noqa: BLE001  never let one source stop the deploy
             log(f"{step.__name__} crashed: {e}")
-    meta = {"generated": NOW.isoformat(), "sources": STATUS}
+    trigger = {"schedule": "scheduled", "push": "file upload", "workflow_dispatch": "manual run"}.get(
+        os.environ.get("GITHUB_EVENT_NAME", ""), "local run")
+    run_url = None
+    if os.environ.get("GITHUB_RUN_ID"):
+        run_url = "{}/{}/actions/runs/{}".format(os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
+                                                 os.environ.get("GITHUB_REPOSITORY", ""), os.environ["GITHUB_RUN_ID"])
+    history = []
+    if SITE_URL:
+        try:
+            history = json.loads(get(f"{SITE_URL}/data/meta.json", tries=1)).get("history", [])
+        except Exception:  # noqa: BLE001
+            history = []
+    ok = sum(1 for v in STATUS.values() if v.get("ok"))
+    history = (history + [{"at": NOW.isoformat(), "trigger": trigger, "ok": ok, "total": len(STATUS)}])[-12:]
+    meta = {"generated": NOW.isoformat(), "trigger": trigger, "run_url": run_url,
+            "schedule": "17 */3 * * *", "sources": STATUS, "history": history}
     write("meta.json", json.dumps(meta, indent=1))
     log(json.dumps(meta, indent=1))
 
