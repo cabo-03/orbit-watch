@@ -27,7 +27,7 @@
     <button id="mobToggle" class="btn panel" aria-controls="side">Menu</button>
     <div id="clock" class="panel">
       <span id="utc">—</span>
-      <small><span id="mode" class="live">LIVE</span> · <span id="fresh" title="Age of the orbit data">loading data…</span></small>
+      <small><span id="mode" class="live">LIVE</span> · <button id="fresh" type="button" title="Show data status">loading data…</button></small>
     </div>
   </div>
 
@@ -70,6 +70,7 @@
     <button class="btn" data-rate="86400">1 day/s</button>
     <button class="btn" data-rate="2592000">30 days/s</button>
   </div>
+  <div id="credit"></div>
   <div id="hint">Drag to rotate · scroll or pinch to zoom · click any dot</div>
   <div id="err" hidden>The 3D view could not start. WebGL may be turned off in this browser.</div>
 </div>

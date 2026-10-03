@@ -604,7 +604,7 @@ function focusPosS() {
 function setView(v, fromSelect) {
   view = v;
   $("#vGlobe").setAttribute("aria-pressed", v === "globe"); $("#vMap").setAttribute("aria-pressed", v === "map"); $("#vSolar").setAttribute("aria-pressed", v === "solar");
-  canvas.hidden = v === "map"; mapCanvas.hidden = v !== "map";
+  canvas.hidden = v === "map"; mapCanvas.hidden = v !== "map"; $("#credit").hidden = v === "solar";
   ctlE.enabled = v === "globe"; ctlS.enabled = v === "solar";
   for (const L of allLabels) { L.el.hidden = true; L.shown = false; }
   $("#tip").hidden = true;
@@ -636,6 +636,35 @@ let padLabels = [];
 function padLocal(lat, lon) { const la = lat * DEG, lo = lon * DEG, r = 1.002; return new THREE.Vector3(r * Math.cos(la) * Math.cos(lo), r * Math.sin(la), -r * Math.cos(la) * Math.sin(lo)); }
 function padWorld(lat, lon) { return earth.localToWorld(padLocal(lat, lon)); }
 function shortRocket(r) { return (r || "Launch").replace(/\s+(Block|Blk|v\d|FT)\b.*$/i, "").replace(/\s*\(.*\)/, "").slice(0, 18); }
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// How exact a launch date is. Launch Library marks "sometime in October" as a midnight timestamp;
+// we must not present that as a real countdown.
+function launchWhen(L) {
+  const t = Date.parse(L.net), d = new Date(t);
+  let p = (L.precision || "").toLowerCase();
+  if (!p) {   // data from before the updater stored precision: midnight UTC + unconfirmed = not a real time
+    const midnight = isFinite(t) && d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
+    p = midnight && /tb[dc]/i.test(L.status || "") ? "approx" : "exact";
+  }
+  const exact = /second|minute|hour|exact/.test(p);
+  const mon = MONTHS[d.getUTCMonth()], yr = d.getUTCFullYear(), day = d.getUTCDate();
+  let label;
+  if (exact) label = localTime(t);
+  else if (/morning|afternoon|day/.test(p) && !/approx/.test(p)) label = `${mon.slice(0, 3)} ${day} · time not set`;
+  else if (/week/.test(p)) label = `Week of ${mon.slice(0, 3)} ${day}`;
+  else if (/quarter|q[1-4]/.test(p)) label = `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${yr}`;
+  else if (/half/.test(p)) label = `${d.getUTCMonth() < 6 ? "First" : "Second"} half of ${yr}`;
+  else if (/year/.test(p)) label = String(yr);
+  else label = `${mon} ${yr} · date not set`;   // month precision, or unknown
+  return { t, exact, label, short: exact ? whenText(t) : label.replace(/ · .*$/, "").replace(/^(\w{3})\w* (\d{4})$/, "$1 $2") };
+}
+function inWords(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000)), d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+  if (d) return plural(d, "day") + " " + h + " h " + m + " min";
+  if (h) return h + " h " + m + " min " + sec + " s";
+  return m + " min " + sec + " s";
+}
 function whenText(t) {
   const h = (t - Date.now()) / 3600000;
   if (!isFinite(h)) return "soon"; if (h < 0) return "launched"; if (h < 1) return "within the hour";
@@ -647,7 +676,7 @@ function buildPads() {
     if (L.lat == null || L.lon == null || i > 5) { padLabels.push(null); return; }
     const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.009), new THREE.MeshBasicMaterial({ color: 0xffb44a }));
     m.position.copy(padLocal(L.lat, L.lon)); padGroup.add(m);
-    padLabels.push(makeLabel(shortRocket(L.rocket) + " · " + whenText(Date.parse(L.net)), "#ffb44a", () => select({ type: "launch", i }, true), "pad"));
+    padLabels.push(makeLabel(shortRocket(L.rocket) + " · " + launchWhen(L).short, "#ffb44a", () => select({ type: "launch", i }, true), "pad"));
   });
 }
 let youMarker = null, youLabel = null;
@@ -1008,6 +1037,7 @@ function setLoc(lat, lon) { store.set("loc", { lat, lon }); locEditing = false; 
 const ro = $("#readout");
 function renderReadout() {
   if (!sel) { ro.hidden = true; return; }
+  if (sel.type === "status") { renderStatus(); return; }
   ro.hidden = false;
   let kind, name, color, note = "", sub = "";
   if (sel.type === "sat") {
@@ -1033,7 +1063,7 @@ function renderReadout() {
   } else if (sel.type === "launch") {
     const L = DATA.launches[sel.i]; kind = KIND.launch.label; name = L.mission || L.name; color = KIND.launch.color;
     sub = esc([L.provider, L.rocket].filter(Boolean).join(" · "));
-    note = esc(trimText(L.description, 380)) + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
+    note = (launchWhen(L).exact ? "" : "<b>The date is not confirmed yet.</b> The provider has only given a rough timeframe. ") + esc(trimText(L.description, 380)) + (L.link ? ` <a href="${esc(L.link)}" target="_blank" rel="noopener">${/youtu|x\.com|twitter|live/i.test(L.link) ? "Watch" : "More info"}</a>` : "");
   } else if (sel.type === "you") {
     kind = "Your location"; name = "You are here"; color = "#5fe39a";
     note = "Saved only in this browser. Use Edit to change it or Clear to remove it.";
@@ -1051,7 +1081,7 @@ function renderReadout() {
   if (sel.type === "you") { const i = SAT.idx.get("25544"); let rec = null; try { rec = i != null ? satellite.twoline2satrec(SAT.l1[i], SAT.l2[i]) : null; } catch (e) { rec = null; } renderPasses(ro.querySelector("#passes"), rec, "you", "ISS passes over you"); }
 }
 function updateReadout() {
-  const kv = ro.querySelector("#kv"); if (!kv || ro.hidden || !sel) return;
+  const kv = ro.querySelector("#kv"); if (!kv || ro.hidden || !sel || sel.type === "status") return;
   let rows = "";
   if (sel.type === "sat") {
     const pv = selRec && satellite.propagate(selRec, new Date(simMs));
@@ -1094,8 +1124,9 @@ function updateReadout() {
     else rows += o.b.e < 1 ? `<dt>Orbit</dt><dd>${fmt(Math.pow(semiMajor(o.b), 1.5), 2)} years</dd>` : `<dt>Orbit</dt><dd>Escaping (e = ${fmt(o.b.e, 3)})</dd>`;
     if (o.kind === "neo") { const c = DATA.cad.approaches.find(c => c.des === o.b.des); if (c) rows += cadRows(c); }
   } else if (sel.type === "launch") {
-    const L = DATA.launches[sel.i], t = Date.parse(L.net);
-    rows = `<dt>${t > Date.now() ? "Countdown" : "Since launch"}</dt><dd>T${t > Date.now() ? "−" : "+"}${dur(t - Date.now())}</dd><dt>Window</dt><dd>${localTime(t)}</dd>
+    const L = DATA.launches[sel.i], w = launchWhen(L), now = Date.now();
+    const count = !w.exact ? "Not set yet" : w.t > now ? "in " + inWords(w.t - now) : "Scheduled " + ago(now - w.t).replace(" ago", "") + " ago";
+    rows = `<dt>Launch</dt><dd>${esc(w.label)}</dd><dt>Countdown</dt><dd>${count}</dd>${w.exact && L.window_end && L.window_end !== L.window_start ? `<dt>Window closes</dt><dd>${localTime(Date.parse(L.window_end))}</dd>` : ""}
       <dt>Status</dt><dd>${esc(L.status || "—")}</dd><dt>Orbit</dt><dd>${esc(L.orbit || "—")}</dd><dt>Pad</dt><dd>${esc(L.pad || "—")}</dd><dt>Site</dt><dd>${esc(L.location || "—")}</dd>`;
   } else if (sel.type === "cad") rows = cadRows(DATA.cad.approaches[sel.i]);
   else if (sel.type === "you") {
@@ -1198,12 +1229,13 @@ function buildLaunches() {
   if (!DATA.launches.length) { el.innerHTML = `<div class="empty">Launch schedule arrives with the first automatic update.</div>`; return; }
   DATA.launches.forEach((L, i) => {
     const parts = (L.name || "").split("|").map(s => s.trim());
-    const b = itemBtn("launch:" + i, KIND.launch.color, parts[1] || L.name, "", () => select({ type: "launch", i }, true), `${parts[0] || L.rocket || ""} · ${L.location || ""}`);
-    b.querySelector(".v").dataset.net = L.net; el.appendChild(b);
+    const w = launchWhen(L);
+    const b = itemBtn("launch:" + i, KIND.launch.color, parts[1] || L.name, "", () => select({ type: "launch", i }, true), `${w.label} · ${parts[0] || L.rocket || ""} · ${L.location || ""}`);
+    b.querySelector(".v").dataset.i = i; if (!w.exact) b.classList.add("tbd"); el.appendChild(b);
   });
 }
 function tickLaunchCountdowns() {
-  document.querySelectorAll("#launchList .v").forEach(v => { const t = Date.parse(v.dataset.net); v.textContent = isFinite(t) ? (t > Date.now() ? "T−" : "T+") + dur(t - Date.now()).replace(/^(\d+d) .*/, "$1") : ""; });
+  document.querySelectorAll("#launchList .v").forEach(v => { const L = DATA.launches[+v.dataset.i]; if (!L) return; const w = launchWhen(L); v.textContent = w.exact ? whenText(w.t) : "TBD"; });
 }
 const tabs = { tabObj: "pObj", tabFly: "pFly", tabLaunch: "pLaunch" };
 Object.entries(tabs).forEach(([t, p]) => { $("#" + t).onclick = () => { Object.entries(tabs).forEach(([t2, p2]) => { $("#" + t2).setAttribute("aria-selected", t2 === t); $("#" + p2).hidden = t2 !== t; }); }; });
@@ -1220,13 +1252,51 @@ liveBtn.onclick = () => setRate(1, true);
 rateBtns.forEach(b => b.onclick = () => setRate(+b.dataset.rate, false));
 
 /* ================================================================ freshness & auto-refresh */
+// next run of the "17 */3 * * *" schedule (UTC)
+function nextScheduled(from) {
+  const d = new Date(from); d.setUTCMinutes(17, 0, 0);
+  while (d.getTime() <= from || d.getUTCHours() % 3 !== 0) d.setUTCHours(d.getUTCHours() + 1, 17, 0, 0);
+  return d.getTime();
+}
+const SOURCE_INFO = [
+  ["satellites", "Satellite orbits", "CelesTrak", v => fmt(v.count) + " satellites"],
+  ["debris", "Debris clouds", "CelesTrak", () => "4 clouds"],
+  ["smallbodies", "Asteroids and comets", "NASA JPL", v => fmt(v.count) + " objects"],
+  ["closeapproach", "Asteroid flybys", "NASA JPL", v => fmt(v.count) + " in next 60 days"],
+  ["launches", "Launch schedule", "Launch Library 2", v => fmt(v.count) + " launches"],
+  ["earth_image", "Earth daytime imagery", "NASA VIIRS", v => v.date ? "photos from " + imgDate(v.date) : ""],
+  ["earth_night", "City lights", "NASA Black Marble", () => "fixed image"],
+];
+function imgDate(s) { const d = new Date(s + "T12:00:00Z"); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
+function renderStatus() {
+  const m = DATA.meta || {}, src = m.sources || {}, now = Date.now();
+  const gen = m.generated ? Date.parse(m.generated) : null;
+  const rows = SOURCE_INFO.map(([k, label, from, detail]) => {
+    const v = src[k];
+    const state = !v ? '<span class="chip">Waiting</span>' : v.ok ? '<span class="chip ok">OK</span>' : '<span class="chip old">Failed</span>';
+    return `<div class="srcrow"><div><b>${label}</b><span>${from}${v && v.ok && detail(v) ? " · " + detail(v) : ""}${v && !v.ok ? " · showing the last good copy" : ""}</span></div><div>${state}</div></div>`;
+  }).join("");
+  const hist = (m.history || []).slice().reverse().slice(0, 8).map(h => `<div class="histrow"><span>${localTime(Date.parse(h.at))}</span><span>${esc(h.trigger)}</span><span>${h.ok}/${h.total} OK</span></div>`).join("");
+  const sched = (m.history || []).some(h => h.trigger === "scheduled");
+  ro.hidden = false; ro.style.setProperty("--c", "var(--ok)");
+  ro.innerHTML = `<button class="btn" id="closeRO" aria-label="Close data status">✕</button><div class="kind">Data status</div><h3>${gen ? "Updated " + ago(now - gen) : "Waiting for first update"}</h3>
+    <div class="sub">${gen ? localTime(gen) + (m.trigger ? " · started by " + esc(m.trigger) : "") : ""}</div>
+    <dl class="kv"><dt>Next update</dt><dd>about ${new Date(nextScheduled(now)).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</dd><dt>Schedule</dt><dd>every 3 hours</dd></dl>
+    <div class="passes"><h4>Sources in the last update</h4>${rows}</div>
+    ${hist ? `<div class="passes"><h4>Recent updates</h4>${hist}${sched ? "" : '<p class="intro" style="margin:6px 0 0">No scheduled update has run yet. GitHub can delay the first scheduled runs of a new workflow.</p>'}</div>` : ""}
+    <div class="note">Positions are calculated live in your browser from this data. An open page checks for new data every 15 minutes. GitHub can start scheduled updates up to an hour late.${m.run_url ? ` <a href="${esc(m.run_url)}" target="_blank" rel="noopener">Log of the last update</a>` : ""}</div>`;
+  ro.querySelector("#closeRO").onclick = () => { ro.hidden = true; sel = null; };
+}
+$("#fresh").addEventListener("click", () => { sel = { type: "status" }; for (const L of allLabels) L.el.classList.remove("sel"); renderStatus(); if (MOBILE) $("#side").dataset.open = "false"; });
 function updateFreshness() {
   const el = $("#fresh"), m = DATA.meta;
-  if (!m || !m.generated) { el.textContent = "starter data · first update pending"; el.className = "warn"; return; }
+  if (!m || !m.generated) { el.textContent = "starter data · first update pending"; el.className = "warn"; $("#credit").textContent = "Earth: NASA Blue Marble · night lights: NASA Black Marble"; return; }
   const age = Date.now() - Date.parse(m.generated);
   const sat = m.sources && m.sources.satellites;
   el.textContent = "data updated " + ago(age) + (sat && !sat.ok ? " · satellite feed down, using last copy" : "");
   el.className = age < 6 * 3600000 ? "ok" : age < 30 * 3600000 ? "warn" : "bad";
+  const img = m.sources && m.sources.earth_image;
+  $("#credit").textContent = img && img.ok && img.date ? `Earth: NASA satellite photos from ${imgDate(img.date)} · night lights: NASA Black Marble` : "Earth: NASA Blue Marble · night lights: NASA Black Marble";
 }
 async function loadAll(first) {
   const [meta, groups, small, cad, launches] = await Promise.all([
@@ -1242,6 +1312,7 @@ async function loadAll(first) {
   initSmallBodies(); buildPads(); buildFlybys(); buildLaunches(); updateFreshness(); loadEarthImagery();
   loadWorker();
   if (!first) buildList();
+  if (sel && sel.type === "status") renderStatus();
 }
 setInterval(async () => {   // pick up new data while the page stays open
   const m = await fetchJSON("data/meta.json", null);
