@@ -347,6 +347,102 @@ def update_launches():
     keep_previous("launches.json")
 
 
+LL2_RECENT = "https://ll.thespacedevs.com/2.3.0/launches/previous/?limit=12&mode=normal"
+
+
+def update_recent_launches():
+    """Launches from the last few weeks, with the international designator that links them to satellites."""
+    try:
+        d = json.loads(get(LL2_RECENT, tries=2))
+        out = []
+        for r in d.get("results", []):
+            out.append({
+                "name": r.get("name"), "net": r.get("net"),
+                "status": pick(r, "status", "abbrev") or pick(r, "status", "name"),
+                "provider": pick(r, "launch_service_provider", "name"),
+                "rocket": pick(r, "rocket", "configuration", "full_name") or pick(r, "rocket", "configuration", "name"),
+                "mission": pick(r, "mission", "name"), "orbit": pick(r, "mission", "orbit", "name"),
+                "description": (pick(r, "mission", "description") or "")[:400],
+                "location": pick(r, "pad", "location", "name"),
+                "lat": num(pick(r, "pad", "latitude")), "lon": num(pick(r, "pad", "longitude")),
+                "designator": r.get("launch_designator"),
+            })
+        write("recentlaunches.json", json.dumps({"generated": NOW.isoformat(), "launches": out}, indent=0))
+        STATUS["recentlaunches"] = {"ok": True, "count": len(out)}
+        log(f"recent launches: {len(out)}")
+    except Exception as e:  # noqa: BLE001
+        STATUS["recentlaunches"] = {"ok": False, "error": str(e)[:200]}
+        keep_previous("recentlaunches.json")
+
+
+# ------------------------------------------------------------ tropical storms
+NHC = "https://www.nhc.noaa.gov/CurrentStorms.json"
+GDACS = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?eventlist=TC"
+NHC_TYPES = {"TD": "Tropical depression", "TS": "Tropical storm", "HU": "Hurricane", "STD": "Subtropical depression",
+             "STS": "Subtropical storm", "PTC": "Potential tropical cyclone", "TY": "Typhoon", "PC": "Post-tropical cyclone"}
+
+
+def update_storms():
+    storms, ok = [], 0
+    # US National Hurricane Center: Atlantic and Eastern/Central Pacific, with advisories every 6 hours
+    try:
+        d = json.loads(get(NHC, tries=2))
+        for r in d.get("activeStorms", []):
+            adv = r.get("publicAdvisory") or {}
+            storms.append({
+                "id": r.get("id"), "name": (r.get("name") or "").title(), "source": "NHC",
+                "type": NHC_TYPES.get(r.get("classification"), r.get("classification")),
+                "wind_kt": num(r.get("intensity")), "pressure": num(r.get("pressure")),
+                "lat": num(r.get("latitudeNumeric")), "lon": num(r.get("longitudeNumeric")),
+                "move_dir": num(r.get("movementDir")), "move_kt": num(r.get("movementSpeed")),
+                "updated": r.get("lastUpdate"),
+                "link": adv.get("url") or "https://www.nhc.noaa.gov/",
+            })
+        ok += 1
+    except Exception as e:  # noqa: BLE001
+        log(f"nhc: {e}")
+    # GDACS (EU/UN): every ocean basin, used for storms the NHC does not cover
+    try:
+        d = json.loads(get(GDACS, tries=2))
+        cutoff = NOW - dt.timedelta(hours=30)
+        have = {s["name"].lower() for s in storms}
+        for f in d.get("features", []):
+            p = f.get("properties", {})
+            if str(p.get("iscurrent")).lower() != "true":
+                continue
+            try:
+                to = dt.datetime.fromisoformat(p.get("todate")).replace(tzinfo=dt.timezone.utc)
+            except Exception:  # noqa: BLE001
+                continue
+            if to < cutoff:
+                continue
+            name = (p.get("eventname") or "").rsplit("-", 1)[0].replace("-", " ").title()
+            if name.lower() in have:
+                continue
+            coords = (f.get("geometry") or {}).get("coordinates") or [None, None]
+            sev = p.get("severitydata") or {}
+            kmh = num(sev.get("severity"))
+            storms.append({
+                "id": f"gdacs{p.get('eventid')}", "name": name, "source": "GDACS",
+                "type": sev.get("severitytext") or "Tropical cyclone",
+                "wind_kt": kmh / 1.852 if kmh else None, "pressure": None,
+                "lat": num(coords[1]), "lon": num(coords[0]), "move_dir": None, "move_kt": None,
+                "updated": p.get("todate") + "Z" if p.get("todate") else None,
+                "alert": p.get("alertlevel"),
+                "link": f"https://www.gdacs.org/report.aspx?eventtype=TC&eventid={p.get('eventid')}",
+            })
+        ok += 1
+    except Exception as e:  # noqa: BLE001
+        log(f"gdacs: {e}")
+    if ok:
+        write("storms.json", json.dumps({"generated": NOW.isoformat(), "storms": storms}, indent=0))
+        STATUS["storms"] = {"ok": True, "count": len(storms)}
+        log(f"storms: {len(storms)}")
+    else:
+        STATUS["storms"] = {"ok": False}
+        keep_previous("storms.json")
+
+
 # ------------------------------------------------------- Earth imagery
 # Day: yesterday's real true-colour photos from three NASA/NOAA VIIRS satellites, stacked so
 # each one fills the gaps between the others' strips; any gap left is filled with Blue Marble.
@@ -444,7 +540,10 @@ def update_earth_images():
             result = layers[0][1]
         for name, img in layers:
             # no-data pixels are black; grow the mask a little to swallow the dark JPEG fringe
-            gap = img.convert("L").point(lambda v: 255 if v < 8 else 0).filter(ImageFilter.MaxFilter(7))
+            # no-data = pure black areas between orbit strips. Drop isolated dark pixels (real dark ocean),
+            # grow the area a little to cover the JPEG fringe, then blur it so strips blend without blocks.
+            dark = img.convert("L").point(lambda v: 255 if v < 5 else 0)
+            gap = dark.filter(ImageFilter.MinFilter(9)).filter(ImageFilter.MaxFilter(17)).filter(ImageFilter.GaussianBlur(6))
             result = Image.composite(result, img, gap)
         save_pair(result, "earth_day")
         STATUS["earth_image"] = {"ok": True, "date": date, "layers": [n for n, _ in layers]}
@@ -458,7 +557,7 @@ def update_earth_images():
 def main():
     os.makedirs(OUT, exist_ok=True)
     for step in (update_satellites, update_small_bodies, update_close_approaches,
-                 update_launches, update_earth_images):
+                 update_launches, update_recent_launches, update_storms, update_earth_images):
         log(f"== {step.__name__}")
         try:
             step()
@@ -466,6 +565,8 @@ def main():
             log(f"{step.__name__} crashed: {e}")
     trigger = {"schedule": "scheduled", "push": "file upload", "workflow_dispatch": "manual run"}.get(
         os.environ.get("GITHUB_EVENT_NAME", ""), "local run")
+    if trigger == "manual run" and os.environ.get("GITHUB_ACTOR", "").startswith("github-actions"):
+        trigger = "automatic"   # started by the built-in 3-hour timer
     run_url = None
     if os.environ.get("GITHUB_RUN_ID"):
         run_url = "{}/{}/actions/runs/{}".format(os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
