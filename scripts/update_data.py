@@ -12,7 +12,7 @@ Sources
   JPL SBDB query       comets currently near the Sun
   JPL CNEOS CAD        asteroids passing close to Earth in the next 60 days
   Launch Library 2     upcoming rocket launches
-  NASA GIBS            yesterday's real satellite image of the whole Earth
+  NASA GIBS            yesterday's real satellite images of Earth, and night lights
 
 If a source fails, the script keeps the previously published file (it
 downloads it back from the live site) so one outage never blanks the map.
@@ -345,42 +345,118 @@ def update_launches():
     keep_previous("launches.json")
 
 
-# ------------------------------------------------------- yesterday's Earth image
+# ------------------------------------------------------- Earth imagery
+# Day: yesterday's real true-colour photos from three NASA/NOAA VIIRS satellites, stacked so
+# each one fills the gaps between the others' strips; any gap left is filled with Blue Marble.
+# Night: NASA Black Marble city lights (static, downloaded once and then reused).
 GIBS = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap"
         "&VERSION=1.3.0&LAYERS={layer}&STYLES=&CRS=EPSG:4326&BBOX=-90,-180,90,180"
-        "&WIDTH=4096&HEIGHT=2048&FORMAT=image/jpeg&TIME={date}")
-GIBS_LAYERS = ["VIIRS_NOAA20_CorrectedReflectance_TrueColor",
-               "VIIRS_SNPP_CorrectedReflectance_TrueColor",
-               "MODIS_Terra_CorrectedReflectance_TrueColor"]
+        "&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg{time}")
+DAY_LAYERS = ["VIIRS_NOAA21_CorrectedReflectance_TrueColor",   # bottom of the stack
+              "VIIRS_SNPP_CorrectedReflectance_TrueColor",
+              "VIIRS_NOAA20_CorrectedReflectance_TrueColor"]   # top of the stack
+BASE_LAYER = "BlueMarble_NextGeneration"
+NIGHT_LAYER = "VIIRS_Black_Marble"
+BIG, SMALL = 8192, 4096
 
 
-def update_earth_image():
+def pillow():
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pillow"], check=True)
+    from PIL import Image, ImageFilter
+    Image.MAX_IMAGE_PIXELS = None
+    return Image, ImageFilter
+
+
+def gibs_image(layer, date=None):
+    """Fetch a whole-Earth image at 8192 px, falling back to 4096 px scaled up."""
+    from io import BytesIO
+    Image, _ = pillow()
+    t = f"&TIME={date}" if date else ""
+    for w in (BIG, SMALL):
+        try:
+            data = get(GIBS.format(layer=layer, w=w, h=w // 2, time=t), timeout=300, tries=2)
+            if data[:3] != b"\xff\xd8\xff":
+                raise ValueError("not a JPEG: " + data[:120].decode("utf-8", "replace"))
+            img = Image.open(BytesIO(data)).convert("RGB")
+            return img if img.width == BIG else img.resize((BIG, BIG // 2), Image.LANCZOS)
+        except Exception as e:  # noqa: BLE001
+            log(f"gibs {layer} {date or ''} at {w}px: {e}")
+    raise RuntimeError(f"{layer} unavailable")
+
+
+def save_pair(img, stem):
+    Image, _ = pillow()
+    os.makedirs(OUT, exist_ok=True)
+    img.save(os.path.join(OUT, f"{stem}_8k.jpg"), quality=84, optimize=True, progressive=True)
+    img.resize((SMALL, SMALL // 2), Image.LANCZOS).save(
+        os.path.join(OUT, f"{stem}_4k.jpg"), quality=86, optimize=True, progressive=True)
+
+
+def previous_meta():
+    if not SITE_URL:
+        return {}
+    try:
+        return json.loads(get(f"{SITE_URL}/data/meta.json", tries=1)).get("sources", {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def update_earth_images():
+    prev = previous_meta()
+    Image, ImageFilter = pillow()
+
+    # night lights: static, so reuse the published copy when there is one
+    if prev.get("earth_night", {}).get("ok") and keep_previous("earth_night_8k.jpg") and keep_previous("earth_night_4k.jpg"):
+        STATUS["earth_night"] = prev["earth_night"]
+    else:
+        try:
+            save_pair(gibs_image(NIGHT_LAYER), "earth_night")
+            STATUS["earth_night"] = {"ok": True, "layer": NIGHT_LAYER}
+            log("night lights: saved")
+        except Exception as e:  # noqa: BLE001
+            STATUS["earth_night"] = {"ok": False, "error": str(e)[:200]}
+
+    # day imagery: once per day is enough
     for back in (1, 2):
         date = (NOW - dt.timedelta(days=back)).strftime("%Y-%m-%d")
-        for layer in GIBS_LAYERS:
+        p = prev.get("earth_image", {})
+        if p.get("ok") and p.get("date") == date and keep_previous("earth_day_8k.jpg") and keep_previous("earth_day_4k.jpg"):
+            STATUS["earth_image"] = p
+            log(f"day imagery for {date} already published, reused")
+            return
+        layers = []
+        for layer in DAY_LAYERS:
             try:
-                img = get(GIBS.format(layer=layer, date=date), timeout=180, tries=2)
-                if img[:3] != b"\xff\xd8\xff" or len(img) < 200_000:
-                    raise ValueError("not a full JPEG image")
-                write("earth_today.jpg", img)
-                STATUS["earth_image"] = {"ok": True, "date": date, "layer": layer}
-                log(f"earth image: {layer} {date} ({len(img) // 1024} KB)")
-                return
+                layers.append((layer, gibs_image(layer, date)))
             except Exception as e:  # noqa: BLE001
-                log(f"gibs {layer} {date}: {e}")
-    STATUS["earth_image"] = {"ok": False}
-    if keep_previous("earth_today.jpg"):
+                log(str(e))
+        if not layers:
+            continue
         try:
-            prev = json.loads(get(f"{SITE_URL}/data/meta.json", tries=1))
-            STATUS["earth_image"] = prev.get("sources", {}).get("earth_image", {"ok": False})
+            result = gibs_image(BASE_LAYER)
         except Exception:  # noqa: BLE001
-            pass
+            result = layers[0][1]
+        for name, img in layers:
+            # no-data pixels are black; grow the mask a little to swallow the dark JPEG fringe
+            gap = img.convert("L").point(lambda v: 255 if v < 8 else 0).filter(ImageFilter.MaxFilter(7))
+            result = Image.composite(result, img, gap)
+        save_pair(result, "earth_day")
+        STATUS["earth_image"] = {"ok": True, "date": date, "layers": [n for n, _ in layers]}
+        log(f"day imagery {date}: composited {len(layers)} satellites")
+        return
+    STATUS["earth_image"] = {"ok": False}
+    if keep_previous("earth_day_8k.jpg") and keep_previous("earth_day_4k.jpg"):
+        STATUS["earth_image"] = prev.get("earth_image", {"ok": False})
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
     for step in (update_satellites, update_small_bodies, update_close_approaches,
-                 update_launches, update_earth_image):
+                 update_launches, update_earth_images):
         log(f"== {step.__name__}")
         try:
             step()
