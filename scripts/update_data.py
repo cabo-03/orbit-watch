@@ -454,6 +454,12 @@ DAY_LAYERS = ["VIIRS_NOAA21_CorrectedReflectance_TrueColor",   # bottom of the s
               "VIIRS_SNPP_CorrectedReflectance_TrueColor",
               "VIIRS_NOAA20_CorrectedReflectance_TrueColor"]   # top of the stack
 BASE_LAYER = "BlueMarble_NextGeneration"
+COMPOSITE_VERSION = 2   # bump to rebuild today's image after changing how it is made
+
+
+def FILL_LAYERS(date, prev_date):
+    return [("VIIRS_NOAA20_CorrectedReflectance_TrueColor", prev_date),
+            ("MODIS_Terra_CorrectedReflectance_TrueColor", date)]
 NIGHT_LAYER = "VIIRS_Black_Marble"
 BIG, SMALL = 8192, 4096
 
@@ -521,33 +527,44 @@ def update_earth_images():
     # day imagery: once per day is enough
     for back in (1, 2):
         date = (NOW - dt.timedelta(days=back)).strftime("%Y-%m-%d")
+        prev_date = (NOW - dt.timedelta(days=back + 1)).strftime("%Y-%m-%d")
         p = prev.get("earth_image", {})
-        if p.get("ok") and p.get("date") == date and keep_previous("earth_day_8k.jpg") and keep_previous("earth_day_4k.jpg"):
+        if (p.get("ok") and p.get("date") == date and p.get("version") == COMPOSITE_VERSION
+                and keep_previous("earth_day_8k.jpg") and keep_previous("earth_day_4k.jpg")):
             STATUS["earth_image"] = p
             log(f"day imagery for {date} already published, reused")
             return
-        layers = []
+        main = []
         for layer in DAY_LAYERS:
             try:
-                layers.append((layer, gibs_image(layer, date)))
+                main.append((layer, date, gibs_image(layer, date)))
             except Exception as e:  # noqa: BLE001
                 log(str(e))
-        if not layers:
+        if not main:
             continue
+        # Fill layers, used only where the main photos have no data. All VIIRS satellites pass at about
+        # 1:30 PM local time, so they share the same wedge-shaped gap at the date line. Terra passes at
+        # 10:30 AM (its gap sits elsewhere) and the previous day's photos cover the wedge completely.
+        fills = []
+        for layer, d in FILL_LAYERS(date, prev_date):
+            try:
+                fills.append((layer, d, gibs_image(layer, d)))
+            except Exception as e:  # noqa: BLE001
+                log(str(e))
         try:
             result = gibs_image(BASE_LAYER)
         except Exception:  # noqa: BLE001
-            result = layers[0][1]
-        for name, img in layers:
-            # no-data pixels are black; grow the mask a little to swallow the dark JPEG fringe
+            result = (fills or main)[0][2]
+        for name, d, img in fills + main:   # bottom of the stack first, so later layers win
             # no-data = pure black areas between orbit strips. Drop isolated dark pixels (real dark ocean),
             # grow the area a little to cover the JPEG fringe, then blur it so strips blend without blocks.
             dark = img.convert("L").point(lambda v: 255 if v < 5 else 0)
-            gap = dark.filter(ImageFilter.MinFilter(9)).filter(ImageFilter.MaxFilter(17)).filter(ImageFilter.GaussianBlur(6))
+            gap = dark.filter(ImageFilter.MinFilter(9)).filter(ImageFilter.MaxFilter(17)).filter(ImageFilter.GaussianBlur(8))
             result = Image.composite(result, img, gap)
         save_pair(result, "earth_day")
-        STATUS["earth_image"] = {"ok": True, "date": date, "layers": [n for n, _ in layers]}
-        log(f"day imagery {date}: composited {len(layers)} satellites")
+        STATUS["earth_image"] = {"ok": True, "date": date, "version": COMPOSITE_VERSION,
+                                 "layers": [f"{n} {d}" for n, d, _ in fills + main]}
+        log(f"day imagery {date}: composited {len(main)} main and {len(fills)} fill images")
         return
     STATUS["earth_image"] = {"ok": False}
     if keep_previous("earth_day_8k.jpg") and keep_previous("earth_day_4k.jpg"):
