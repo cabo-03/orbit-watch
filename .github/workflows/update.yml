@@ -1,14 +1,15 @@
 name: Update data and publish
 
-# Three ways this runs:
-#  1. A built-in timer (the "next-run" job below): every run waits until the next 3-hour slot and
-#     then starts the following run itself. This keeps the site updating even when GitHub's own
-#     scheduler is late or skips runs, which it does not guarantee.
-#  2. GitHub's scheduler, as a backup.
+# How this runs:
+#  1. A built-in timer (the "next-run" job): every run waits until the next 3-hour slot and then
+#     starts the following run itself. This is the main clock.
+#  2. GitHub's scheduler, as a watchdog only: a scheduled run first checks whether the timer is
+#     already waiting. If it is, the scheduled run does nothing, so updates never double up.
+#     If the timer has stopped (for example after a GitHub outage), it updates and restarts it.
 #  3. Every upload to the repository, and the "Run workflow" button on the Actions tab.
 on:
   schedule:
-    - cron: "17 */3 * * *"   # every 3 hours, at 17 minutes past (UTC)
+    - cron: "37 */3 * * *"   # watchdog, 20 minutes after each update slot (UTC)
   push:
     branches: [main]
   workflow_dispatch:
@@ -17,19 +18,42 @@ permissions:
   contents: read
   pages: write
   id-token: write
-  actions: write             # lets the timer start the next run
+  actions: write             # lets the timer start the next run and the watchdog look for it
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.decide.outputs.go }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          others=$(gh run list --repo "${{ github.repository }}" --workflow update.yml --status in_progress \
+                     --json databaseId --jq "[.[] | select(.databaseId != ${{ github.run_id }})] | length")
+          if [ "$others" -gt 0 ]; then
+            echo "The 3-hour timer is running, so this scheduled check has nothing to do."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No timer found. Updating now and restarting the timer."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check
+    if: ${{ needs.check.outputs.go == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -38,7 +62,7 @@ jobs:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
         run: python scripts/update_data.py site/data
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
@@ -53,12 +77,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   next-run:
-    # Runs even if this update failed, so one bad run never stops the chain.
-    needs: [build, deploy]
-    if: ${{ always() }}
+    # Runs even if the update failed, so one bad run never stops the clock.
+    needs: [check, build, deploy]
+    if: ${{ always() && needs.check.outputs.go == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 200
     # Only one timer may exist: a newer run's timer replaces any older one.
